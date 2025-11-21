@@ -5,6 +5,7 @@ import time
 import uuid
 import os
 import sys
+import subprocess
 
 from common import send_json_to_addr, send_json_on_sock, recv_json_from_sock
 
@@ -36,6 +37,8 @@ class PeerNode:
         self.port = port
         self.bootstrap = bootstrap
         self.is_leader = is_leader
+
+        self._system_player = None
 
         # peer_id -> (host, port)
         self.peers = {}
@@ -240,29 +243,85 @@ class PeerNode:
 
     def _start_play_local(self, track):
         local_path = os.path.join(MUSIC_DIR, track) if track else None
-        print(f"[PLAY] starting {track} at local_time={now():.3f}")
 
+        if not local_path or not os.path.isfile(local_path):
+            print(f"[PLAY_ERR] Track file not found: {track}")
+            return False
+
+        # 先停止任何现有的播放
+        self._pause_local()
+
+        # 更新播放状态
         self.current_track = track
         self.is_playing = True
         self.play_start_time = now()
+        self.pause_position = 0.0
 
+        print(f"[DEBUG] Starting playback for: {track}")
+
+        # 优先使用 pygame，因为它支持暂停/恢复和定位
         if AUDIO_BACKEND == "pygame":
             try:
+                # 重新初始化确保状态正确
+                pygame.mixer.quit()
+                time.sleep(0.1)
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+
+                # 加载并播放
+                pygame.mixer.music.load(local_path)
                 pygame.mixer.music.play()
+
+                # 检查是否真的在播放
+                time.sleep(0.3)
+                if pygame.mixer.music.get_busy():
+                    print(f"[PLAY] successfully started with pygame: {track}")
+                    return True
+                else:
+                    print("[PLAY_ERR] Pygame: Music loaded but not playing")
+                    # 回退到系统命令
+                    return self._play_with_system_command(local_path)
+
             except Exception as e:
-                print("[PLAY_ERR]", e)
-        elif AUDIO_BACKEND == "pydub":
-            try:
-                seg = AudioSegment.from_file(local_path)
-                play_audio_pydub(seg)
-            except Exception as e:
-                print("[PLAY_ERR]", e)
+                print(f"[PLAY_ERR] Pygame failed: {e}")
+                # 回退到系统命令
+                return self._play_with_system_command(local_path)
         else:
-            # fallback: system call (mac afplay)
-            if local_path and os.path.isfile(local_path):
-                os.system(f"afplay {local_path} &")
-            else:
-                print("[PLAY] no audio backend available")
+            # 如果没有pygame，使用系统命令
+            return self._play_with_system_command(local_path)
+
+    def _start_play_local_from_position(self, track, position):
+        """从指定位置开始播放"""
+        local_path = os.path.join(MUSIC_DIR, track) if track else None
+
+        if not local_path or not os.path.isfile(local_path):
+            print(f"[PLAY_ERR] Track file not found: {track}")
+            return False
+
+        # 优先使用 pygame 进行精确定位
+        if AUDIO_BACKEND == "pygame":
+            try:
+                pygame.mixer.quit()
+                time.sleep(0.1)
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+
+                pygame.mixer.music.load(local_path)
+                pygame.mixer.music.play(start=position)  # pygame 支持从指定位置开始
+
+                self.current_track = track
+                self.is_playing = True
+                self.play_start_time = now() - position
+                self.pause_position = 0.0
+
+                time.sleep(0.3)
+                if pygame.mixer.music.get_busy():
+                    print(f"[RESUME] successfully resumed with pygame from {position:.2f}s")
+                    return True
+            except Exception as e:
+                print(f"[RESUME_ERR] Pygame resume failed: {e}")
+
+        # 如果pygame失败，使用系统命令的近似方案
+        print(f"[RESUME] using approximate positioning with system command")
+        return self._start_play_local(track)
 
     def _prepare_and_schedule_pause(self, delay):
         if delay <= 0:
@@ -276,18 +335,44 @@ class PeerNode:
 
     def _pause_local(self):
         print(f"[PAUSE] pausing playback at local_time={now():.3f}")
+
+        if not self.is_playing:
+            print("[PAUSE] not currently playing, ignoring")
+            return
+
+        # 优先处理 pygame
         if AUDIO_BACKEND == "pygame":
             try:
-                pygame.mixer.music.pause()
-                # 记录暂停位置
-                if self.is_playing:
-                    self.pause_position = now() - self.play_start_time
-                    self.is_playing = False
-                    print(f"[PAUSE] saved position: {self.pause_position:.2f}s")
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.pause()
+                    print("[PAUSE] pygame music paused")
+                else:
+                    print("[PAUSE] pygame reports not playing")
             except Exception as e:
-                print("[PAUSE_ERR]", e)
-        else:
-            print("[PAUSE] pause not supported with current audio backend")
+                print(f"[PAUSE_ERR] pygame pause failed: {e}")
+
+        # 然后处理系统命令播放器
+        if hasattr(self, '_system_player') and self._system_player:
+            try:
+                print(f"[PAUSE] terminating system player process {self._system_player.pid}")
+                self._system_player.terminate()
+                self._system_player.wait(timeout=1.0)
+                self._system_player = None
+                print("[PAUSE] system player terminated successfully")
+            except Exception as e:
+                print(f"[PAUSE_ERR] failed to terminate system player: {e}")
+                try:
+                    self._system_player.kill()
+                    self._system_player = None
+                except:
+                    pass
+
+        # 更新播放状态
+        if self.is_playing:
+            elapsed = now() - self.play_start_time
+            self.pause_position = elapsed
+            self.is_playing = False
+            print(f"[PAUSE] saved position: {self.pause_position:.2f}s")
 
     def _prepare_and_schedule_resume(self, delay):
         if delay <= 0:
@@ -301,17 +386,70 @@ class PeerNode:
 
     def _resume_local(self):
         print(f"[RESUME] resuming playback at local_time={now():.3f}")
+
+        if self.is_playing:
+            print("[RESUME] already playing")
+            return
+
+        if not self.current_track:
+            print("[RESUME_ERR] no track to resume")
+            return
+
+        # 首先尝试使用 pygame 恢复（如果之前是用 pygame 播放的）
         if AUDIO_BACKEND == "pygame":
             try:
+                # 检查 pygame 是否已经加载了音乐
                 pygame.mixer.music.unpause()
                 self.is_playing = True
                 # 更新开始时间以反映从暂停位置继续
                 self.play_start_time = now() - self.pause_position
-                print(f"[RESUME] resumed from position: {self.pause_position:.2f}s")
+                print(f"[RESUME] pygame resumed from position: {self.pause_position:.2f}s")
+                return
             except Exception as e:
-                print("[RESUME_ERR]", e)
-        else:
-            print("[RESUME] resume not supported with current audio backend")
+                print(f"[RESUME_ERR] pygame resume failed: {e}")
+                # 如果 pygame 恢复失败，尝试重新从位置开始播放
+                print(f"[RESUME] falling back to position-based playback")
+                self._start_play_local_from_position(self.current_track, self.pause_position)
+                return
+
+        # 如果 pygame 不可用，使用系统命令
+        if hasattr(self, '_system_player') and self._system_player is None and self.pause_position > 0:
+            print(f"[RESUME] restarting system player from {self.pause_position:.2f}s")
+            self._start_play_local_from_position(self.current_track, self.pause_position)
+            return
+
+        # 最后的手段：重新开始播放
+        print("[RESUME] restarting from beginning")
+        self._start_play_local(self.current_track)
+
+    def _start_play_local_from_position(self, track, position):
+        """从指定位置开始播放"""
+        local_path = os.path.join(MUSIC_DIR, track) if track else None
+
+        if not local_path or not os.path.isfile(local_path):
+            print(f"[PLAY_ERR] Track file not found: {track}")
+            return False
+
+        self.current_track = track
+        self.is_playing = True
+        self.play_start_time = now() - position
+        self.pause_position = 0.0
+
+        # 对于系统命令，需要支持从指定位置开始
+        if sys.platform == "darwin":  # macOS
+            try:
+                # afplay 支持从指定时间开始
+                self._system_player = subprocess.Popen([
+                    'afplay', '-t', str(position), local_path
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"[RESUME] restarted with afplay from {position:.2f}s")
+                return True
+            except Exception as e:
+                print(f"[RESUME_ERR] afplay restart failed: {e}")
+
+        # 其他平台或方法：重新开始播放（无法精确定位）
+        print(f"[RESUME] restarting from beginning (positioning not supported)")
+        return self._start_play_local(track)
 
     # --- leader utilities ---
     def broadcast_play(self, track, start_time, leader_id=None):
@@ -339,11 +477,15 @@ class PeerNode:
             leader_id = self.id
         with self.lock:
             peers_copy = dict(self.peers)
+
+        print(f"[DEBUG] Broadcasting pause to {len(peers_copy)} peers")
+
         for pid,(h,p) in peers_copy.items():
             try:
                 send_json_to_addr(h, p, {"type":"PAUSE_REQUEST", "sender_id": self.id, "leader_id": leader_id, "pause_time": pause_time})
-            except:
-                pass
+            except Exception as e:
+                print(f"[DEBUG] Failed to send PAUSE_REQUEST to {pid}: {e}")
+
         # leader also pauses locally
         local_delay = pause_time - now()
         print(f"[LEADER] scheduled pause at leader_time={pause_time:.3f} (in {local_delay:.3f}s)")
@@ -446,7 +588,7 @@ class PeerNode:
                 print(pid, "->", f"{h}:{p}", f"last={age:.2f}s", f"offset={off:.4f}" if off is not None else "offset=n/a")
             print("=============")
 
-    def play_next(self, lead_delay=3.0):
+    def play_next(self, lead_delay=1.0):
         # advance local pointer and instruct peers to play next song at a future absolute time
         if not self.playlist:
             print("[PLAY] no tracks")
@@ -456,7 +598,7 @@ class PeerNode:
         start_time = now() + lead_delay
         self.broadcast_play(track, start_time, leader_id=self.id)
 
-    def play_index(self, index, lead_delay=3.0):
+    def play_index(self, index, lead_delay=1.0):
         if not self.playlist: return
         self.current_index = index % len(self.playlist)
         track = self.playlist[self.current_index]
@@ -525,7 +667,7 @@ class PeerNode:
             # 同时本地也恢复
             self._resume_local()
 
-    def schedule_pause(self, delay=3.0):
+    def schedule_pause(self, delay=1.0):
         """调度在指定延迟后暂停"""
         pause_time = now() + delay
         if self.is_leader:
@@ -533,7 +675,7 @@ class PeerNode:
         else:
             print("[PAUSE] only leader can schedule pauses")
 
-    def schedule_resume(self, delay=3.0):
+    def schedule_resume(self, delay=1.0):
         """调度在指定延迟后恢复"""
         resume_time = now() + delay
         if self.is_leader:
@@ -570,13 +712,13 @@ def main():
                 if not node.is_leader:
                     print("only leader can schedule global play")
                 else:
-                    node.play_next(lead_delay=3.0)
+                    node.play_next(lead_delay=1.0)
             elif cmd[0] == "play":
                 if not node.is_leader:
                     print("only leader can schedule")
                 else:
                     idx = int(cmd[1]) if len(cmd)>1 else 0
-                    node.play_index(idx, lead_delay=3.0)
+                    node.play_index(idx, lead_delay=1.0)
             elif cmd[0] == "sync":
                 if not node.is_leader:
                     print("only leader runs sync in this demo")
@@ -589,10 +731,10 @@ def main():
             elif cmd[0] == "resume":
                 node.resume_immediate()
             elif cmd[0] == "schedule_pause":
-                delay = float(cmd[1]) if len(cmd) > 1 else 3.0
+                delay = float(cmd[1]) if len(cmd) > 1 else 1.0
                 node.schedule_pause(delay)
             elif cmd[0] == "schedule_resume":
-                delay = float(cmd[1]) if len(cmd) > 1 else 3.0
+                delay = float(cmd[1]) if len(cmd) > 1 else 1.0
                 node.schedule_resume(delay)
             elif cmd[0] == "exit":
                 node.pause_immediate()
