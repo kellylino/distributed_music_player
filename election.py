@@ -1,7 +1,7 @@
 # election.py
 import threading
 import time
-import random
+
 from common import send_json_to_addr
 
 def now():
@@ -184,4 +184,4 @@ class BullyElection:
             self.is_leader = (new_leader_id == self.node_id)
 
             if old_leader != new_leader_id:
-                print(f"[ELECTION] Leader updated from {old_leader} to {ne
+                print(f"[ELECTION] Leader updated from {old_leader} to {new_leader_id}")

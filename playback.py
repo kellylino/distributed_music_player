@@ -290,6 +290,18 @@ class AudioPlayer:
         time.sleep(delay)
         self._resume_local()
 
+    def prepare_and_schedule_stop(self, delay):
+        """Schedule stop for future synchronization"""
+        if delay <= 0:
+            self.stop_immediate()
+        else:
+            threading.Thread(target=self._delayed_stop_thread, args=(delay,), daemon=True).start()
+
+    def _delayed_stop_thread(self, delay):
+        """Thread for delayed stop"""
+        time.sleep(delay)
+        self.stop_immediate()
+
     def play_immediate(self, track):
         """Play a track immediately"""
         return self._start_play_local(track)
@@ -303,40 +315,27 @@ class AudioPlayer:
         self._resume_local()
 
     def stop_immediate(self):
-        """Stop playback completely"""
-        self._pause_local()
-        with self.lock:
-            self.current_track = None
-            self.pause_position = 0.0
+        """Stop playback immediately"""
+        self._stop_local()
 
-    def next_track(self):
-        """Advance to next track in playlist"""
-        with self.lock:
-            if not self.playlist:
-                return None
-            self.current_index = (self.current_index + 1) % len(self.playlist)
-            return self.playlist[self.current_index]
+    def _stop_local(self):
+        """Stop playback immediately (local only)"""
+        print(f"[STOP] stopping playback at local_time={now():.3f}")
 
-    def previous_track(self):
-        """Go to previous track in playlist"""
         with self.lock:
-            if not self.playlist:
-                return None
-            self.current_index = (self.current_index - 1) % len(self.playlist)
-            return self.playlist[self.current_index]
+            if not self.is_playing and not self.current_track:
+                print("[STOP] not currently playing, ignoring")
+                return
 
-    def play_index(self, index):
-        """Play track at specific index"""
-        with self.lock:
-            if not self.playlist:
-                return None
-            self.current_index = index % len(self.playlist)
-            return self.playlist[self.current_index]
+        if AUDIO_BACKEND == "pygame":
+            try:
+                pygame.mixer.music.stop()
+                print("[STOP] pygame music stopped")
+            except Exception as e:
+                print(f"[STOP_ERR] pygame stop failed: {e}")
 
-    def get_current_position(self):
-        """Get current playback position in seconds"""
-        with self.lock:
-            if self.is_playing:
-                return now() - self.play_start_time
-            else:
-                return self.pause_position
+        if hasattr(self, '_system_player') and self._system_player:
+            try:
+                print(f"[STOP] terminating system player process {self._system_player.pid}")
+                self._system_player.terminate()
+              

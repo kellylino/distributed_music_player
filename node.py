@@ -1,31 +1,23 @@
 # node.py
-import argparse
-import threading
+import os
 import time
 import uuid
-from network import NetworkManager
-from message_handler import MessageHandler
-from election import BullyElection
-from playback import AudioPlayer
+import random
+import argparse
+import threading
 
-# choose audio backend: try pygame first, else pydub
-AUDIO_BACKEND = None
-try:
-    import pygame
-    AUDIO_BACKEND = "pygame"
-except Exception:
-    try:
-        from pydub import AudioSegment
-        from pydub.playback import _play_with_simpleaudio as play_audio_pydub
-        AUDIO_BACKEND = "pydub"
-    except Exception:
-        AUDIO_BACKEND = None
+from playback import AudioPlayer
+from election import BullyElection
+from network import NetworkManager
+from common import send_json_to_addr
+from message_handler import MessageHandler
 
 MUSIC_DIR = "music"
+
 HEARTBEAT_INTERVAL = 2.0
-PEER_TIMEOUT = 4.0
 MONITOR_INTERVAL = 1.0
 SYNC_INTERVAL = 4.0
+PEER_TIMEOUT = 4.0
 
 def now():
     return time.time()
@@ -36,33 +28,42 @@ class PeerNode:
         self.host = host
         self.port = port
         self.bootstrap = bootstrap
-
-        # Network state
-        self._system_player = None
-        self.peers = {}  # peer_id -> (host, port)
-        self.last_seen = {}  # last seen timestamps
-        self.clock_offsets = {}  # peer_id -> offset seconds
         self.running = True
-        self.lock = threading.Lock()
 
-        # Initialize election module
+        self.lock = threading.RLock()
+
+        # Initialize modules
+        self.player = AudioPlayer()
+        self.network = NetworkManager(
+            host, port, self.id,
+            on_message_callback=self._handle_message,
+            on_peer_update_callback=self._on_peer_update
+        )
         self.election = BullyElection(
             node_id=self.id,
-            peers=self.peers,  # Reference to peers dict
-            get_peer_address=self._get_peer_address,
+            peers=self.network.peers,  # Reference to network's peers
+            get_peer_address=self.network.get_peer_address,
             is_leader=is_leader,
             leader_id=self.id if is_leader else None
         )
+        self.message_handler = MessageHandler(
+            self.id, self.network, self.election, self.player
+        )
 
-        # Initialize playback module
-        self.player = AudioPlayer()
+        # Set up election callbacks
+        self.election.on_new_leader = self._on_new_leader
 
         print(f"[INIT] id={self.id} host={host}:{port} leader={self.is_leader}")
 
-    def _get_peer_address(self, peer_id):
-        """Helper method for election module to get peer addresses"""
-        with self.lock:
-            return self.peers.get(peer_id, (None, None))
+    def _handle_message(self, msg, conn):
+        self.message_handler.handle_message(msg, conn)
+
+    def _on_peer_update(self, action, peer_id):
+        """Handle peer updates from network manager"""
+        if action == "removed" and peer_id == self.leader_id:
+            print(f"[ELECTION] Leader {peer_id} disconnected — starting election")
+            delay = random.uniform(0.5, 2.0)
+            threading.Timer(delay, self.elect_new_leader).start()
 
     def _on_new_leader(self, leader_id):
         """Callback when a new leader is elected"""
@@ -75,10 +76,20 @@ class PeerNode:
             # New leader responsibilities
             threading.Thread(target=self._announce_new_leadership, daemon=True).start()
             threading.Thread(target=self.sync_all_peers, daemon=True).start()
+            # Reconnect to all peers
+            threading.Thread(target=self._reconnect_as_leader, daemon=True).start()
+            # Broadcast reconnect request
+            threading.Thread(target=self.message_handler.broadcast_reconnect_request, daemon=True).start()
         else:
             print(f"[CALLBACK] I am a follower, new leader: {leader_id}")
             # Ensure connection to new leader
             self._ensure_connected_to_leader()
+
+    def _get_peer_address(self, peer_id):
+        """Helper method for election module to get peer addresses"""
+        with self.lock:
+            peers = self.network.get_peers()
+            return peers.get(peer_id, (None, None))
 
     def elect_new_leader(self):
         """Delegate election to the election module"""
@@ -87,16 +98,26 @@ class PeerNode:
     def _announce_new_leadership(self):
         """Announce leadership using election module"""
         def send_to_peer(pid, message):
-            if pid in self.peers:
-                host, port = self.peers[pid]
-                message["host"] = self.host
+            host, port = self.network.get_peer_address(pid)
+            if host and port:
+                message["host"] = self.host  # Include connection info
                 message["port"] = self.port
                 try:
                     send_json_to_addr(host, port, message)
                     print(f"[ANNOUNCE] Sent COORDINATOR to {pid}")
                 except Exception as e:
                     print(f"[ANNOUNCE] Failed to send to {pid}: {e}")
+                    # Try to reconnect and send again
+                    try:
+                        self.network.connect_to_peer(host, port)
+                        send_json_to_addr(host, port, message)
+                        print(f"[ANNOUNCE] Successfully resent to {pid}")
+                    except Exception as e2:
+                        print(f"[ANNOUNCE] Final failure for {pid}: {e2}")
+            else:
+                print(f"[ANNOUNCE] No address for peer {pid}")
 
+        print(f"[ANNOUNCE] Announcing leadership to {len(self.network.get_peers())} peers")
         self.election.announce_leadership(send_to_peer_callback=send_to_peer)
 
     def _ensure_connected_to_leader(self):
@@ -104,28 +125,52 @@ class PeerNode:
         if not self.leader_id or self.leader_id == self.id:
             return
 
-        with self.lock:
-            if self.leader_id in self.peers:
-                print(f"[CONNECT] Already connected to leader {self.leader_id}")
-                return
-
-            # Try to find leader in our known peers
-            for pid, (host, port) in self.peers.items():
-                if pid == self.leader_id:
-                    print(f"[CONNECT] Found leader {self.leader_id} in known peers, connecting...")
-                    threading.Thread(target=self.connect_to_peer, args=(host, port), daemon=True).start()
-                    return
+        leader_host, leader_port = self.network.get_peer_address(self.leader_id)
+        if leader_host and leader_port:
+            print(f"[CONNECT] Already connected to leader {self.leader_id}")
+            return
 
         # If leader not in peers, try to discover through other peers
         print(f"[CONNECT] Leader {self.leader_id} not in direct peers, discovering...")
         self._discover_leader()
 
+    def _reconnect_to_all_peers(self):
+        """Reconnect to all known peers to rebuild network topology"""
+        print("[RECONNECT] Reconnecting to all known peers as new leader...")
+
+        # Get all peer addresses from the network manager
+        peers = self.network.get_peers()
+
+        for pid, (host, port) in peers.items():
+            if pid == self.id:
+                continue
+
+            print(f"[RECONNECT] Attempting to reconnect to {pid} at {host}:{port}")
+            try:
+                # Try to establish direct connection
+                self.network.connect_to_peer(host, port)
+                print(f"[RECONNECT] Successfully reconnected to {pid}")
+            except Exception as e:
+                print(f"[RECONNECT] Failed to reconnect to {pid}: {e}")
+
+    def _reconnect_as_leader(self):
+        """Reconnect to all known peers when becoming leader"""
+        print("[LEADER] Reconnecting to all known peers...")
+        peers = self.network.get_peers()
+
+        for pid, (host, port) in peers.items():
+            if pid == self.id:
+                continue
+            try:
+                print(f"[LEADER] Reconnecting to {pid} at {host}:{port}")
+                self.network.connect_to_peer(host, port)
+            except Exception as e:
+                print(f"[LEADER] Failed to reconnect to {pid}: {e}")
+
     def _discover_leader(self):
         """Discover leader through other peers"""
-        with self.lock:
-            peers_copy = dict(self.peers)
-
-        for pid, (host, port) in peers_copy.items():
+        peers = self.network.get_peers()
+        for pid, (host, port) in peers.items():
             if pid == self.id:
                 continue
 
@@ -141,14 +186,14 @@ class PeerNode:
                     leader_port = resp.get("port")
                     if leader_host and leader_port:
                         print(f"[DISCOVER] Got leader info: {leader_host}:{leader_port}")
-                        threading.Thread(
-                            target=self.connect_to_peer,
-                            args=(leader_host, leader_port),
-                            daemon=True
-                        ).start()
+                        self.network.connect_to_peer(leader_host, leader_port)
                         return
             except Exception as e:
                 print(f"[DISCOVER] Failed to get leader info from {pid}: {e}")
+
+    def connect_to_peer(self, host, port):
+            """Connect to a peer (for external use)"""
+            self.network.connect_to_peer(host, port)
 
     def _scan_music(self):
         if not os.path.isdir(MUSIC_DIR):
@@ -159,380 +204,16 @@ class PeerNode:
 
     # --- server ---
     def start(self):
-        threading.Thread(target=self._run_server, daemon=True).start()
-        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
-        threading.Thread(target=self._monitor_loop, daemon=True).start()
-        threading.Thread(target=self._network_sync_loop, daemon=True).start()
+        self.network.start()
 
-        # if bootstrap given, connect and discover peers
         if self.bootstrap:
-            threading.Thread(target=self.connect_to_peer, args=(self.bootstrap[0], self.bootstrap[1]), daemon=True).start()
+            threading.Thread(
+                target=self.network.connect_to_peer,
+                args=(self.bootstrap[0], int(self.bootstrap[1])),
+                daemon=True
+            ).start()
 
-    def _run_server(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.host, self.port))
-        sock.listen()
-        while self.running:
-            try:
-                conn, addr = sock.accept()
-                threading.Thread(target=self._handle_conn, args=(conn,), daemon=True).start()
-            except Exception:
-                pass
-
-    def _handle_conn(self, conn):
-        while True:
-            msg = recv_json_from_sock(conn)
-            if msg is None:
-                break
-            self._update_last_seen(msg)
-            self._handle_message(msg, conn)
-        try:
-            conn.close()
-        except:
-            pass
-
-    # --- connect to peer (simple HELLO + discovery) ---
-    def connect_to_peer(self, host, port):
-        print(f"[CONNECT_DEBUG] Attempting to connect to {host}:{port}")
-        try:
-            resp = send_json_to_addr(host, port, {
-                "type": "HELLO",
-                "sender_id": self.id,
-                "host": self.host,
-                "port": self.port,
-                "is_leader": self.is_leader,
-                "leader_id": self.leader_id
-            })
-            if resp and resp.get("type") == "HELLO":
-                pid = resp.get("sender_id")
-                print(f"[CONNECT_DEBUG] Successfully connected to {pid} at {host}:{port}")
-
-                # Update leader information
-                if resp.get("is_leader"):
-                    with self.lock:
-                        self.leader_id = pid
-                    print(f"[CONNECT] Connected to leader: {pid}")
-                elif resp.get("leader_id"):
-                    their_leader = resp.get("leader_id")
-                    with self.lock:
-                        if self.leader_id is None or their_leader > self.leader_id:
-                            self.leader_id = their_leader
-                            print(f"[CONNECT] Updated leader to: {their_leader} (from {pid})")
-
-                with self.lock:
-                    self.peers[pid] = (host, port)
-                    self.last_seen[pid] = now()
-                    print(f"[CONNECT_DEBUG] Added {pid} to peers list. Total peers now: {len(self.peers)}")
-
-                # Ask for full discovery to get all peers
-                send_json_to_addr(host, port, {
-                    "type": "DISCOVERY_REQUEST",
-                    "sender_id": self.id
-                })
-
-            else:
-                print(f"[CONNECT_DEBUG] No valid HELLO response from {host}:{port}")
-        except Exception as e:
-            print(f"[CONNECT_DEBUG] Failed to connect to {host}:{port}: {e}")
-
-    def _network_sync_loop(self):
-        """Periodically sync with random peers to maintain complete network view"""
-        while self.running:
-            time.sleep(SYNC_INTERVAL)
-
-            with self.lock:
-                if not self.peers:
-                    continue
-                peers_list = list(self.peers.items())
-                if peers_list:
-                    random_peer = random.choice(peers_list)
-                    pid, (h, p) = random_peer
-
-            try:
-                # print(f"[SYNC_DEBUG] Sending DISCOVERY_REQUEST to {pid} at {h}:{p}")
-
-                # Send discovery request and get response
-                response = send_json_to_addr(h, p, {
-                    "type": "DISCOVERY_REQUEST",
-                    "sender_id": self.id
-                })
-
-                # CRITICAL FIX: Process the discovery response if received
-                if response and response.get("type") == "DISCOVERY_RESPONSE":
-                    # print(f"[SYNC_DEBUG] Processing DISCOVERY_RESPONSE from {pid}")
-                    # Create a mock connection object for the handler
-                    class MockConn:
-                        def __init__(self):
-                            pass
-                        def close(self):
-                            pass
-
-                    # Process the discovery response through the message handler
-                    self._handle_message(response, MockConn())
-                else:
-                    print(f"[SYNC_DEBUG] No valid DISCOVERY_RESPONSE received from {pid}")
-
-            except Exception as e:
-                print(f"[SYNC_DEBUG] Failed to sync with {pid}: {e}")
-
-    def _update_last_seen(self, msg):
-        sid = msg.get("sender_id")
-        if sid:
-            with self.lock:
-                self.last_seen[sid] = now()
-                if "host" in msg and "port" in msg:
-                    if sid not in self.peers:
-                        self.peers[sid] = (msg["host"], msg["port"])
-
-    def _handle_message(self, msg, conn):
-        m = msg.get("type")
-        sid = msg.get("sender_id")
-
-        # TEMPORARY DEBUGGING - REMOVE LATER
-        # print(f"[MSG_FLOW] Received message type: {m} from {sid}")
-
-        # Handle election messages first
-        if m in ["ELECTION", "COORDINATOR"]:
-            def send_response(response_msg):
-                send_json_on_sock(conn, response_msg)
-
-            self.election.handle_election_message(msg, conn, send_response)
-            return
-
-        if m == "HELLO":
-            # Reply with our complete information
-            send_json_on_sock(conn, {
-                "type": "HELLO",
-                "sender_id": self.id,
-                "host": self.host,
-                "port": self.port,
-                "is_leader": self.is_leader,
-                "leader_id": self.leader_id
-            })
-
-            # Update our knowledge from the incoming HELLO
-            with self.lock:
-                self.peers[sid] = (msg.get("host"), msg.get("port"))
-                self.last_seen[sid] = now()
-
-                # Update leader information
-                if msg.get("is_leader"):
-                    if self.leader_id != sid:
-                        self.leader_id = sid
-                        print(f"[HELLO] Updated leader to: {sid}")
-                elif msg.get("leader_id"):
-                    their_leader = msg.get("leader_id")
-                    if self.leader_id is None or their_leader > self.leader_id:
-                        self.leader_id = their_leader
-                        print(f"[HELLO] Updated leader to: {their_leader} (from {sid})")
-
-        elif m == "DISCOVERY_REQUEST":
-            # Share ALL known peers (not just direct connections)
-            with self.lock:
-                # Include self in the peer list
-                plist = [{"peer_id": self.id, "host": self.host, "port": self.port, "is_leader": self.is_leader}]
-                # Include all known peers
-                for pid, (h, p) in self.peers.items():
-                    plist.append({"peer_id": pid, "host": h, "port": p, "is_leader": (pid == self.leader_id)})
-
-            # print(f"[DISCOVERY] Sharing {len(plist)} peers with {sid}")
-
-            send_json_on_sock(conn, {
-                "type": "DISCOVERY_RESPONSE",
-                "sender_id": self.id,
-                "peers": plist
-            })
-
-        elif m == "DISCOVERY_RESPONSE":
-            # print(f"[DISCOVERY_DEBUG] Received peer list with {len(msg.get('peers', []))} entries from {sid}")
-
-            # Debug: print all peers in the received message
-            for i, e in enumerate(msg.get("peers", [])):
-                pid = e["peer_id"]
-                h = e["host"]
-                p = e["port"]
-                is_leader = e.get("is_leader", False)
-                # print(f"[DISCOVERY_DEBUG] {i}: {pid} at {h}:{p} (leader: {is_leader})")
-
-            new_peers = 0
-            updated_peers = 0
-
-            for e in msg.get("peers", []):
-                pid, h, p = e["peer_id"], e["host"], e["port"]
-                is_leader = e.get("is_leader", False)
-
-                if pid == self.id:
-                    # print(f"[DISCOVERY_DEBUG] Skipping self: {pid}")
-                    continue
-
-                with self.lock:
-                    # Update leader information
-                    if is_leader:
-                        if self.leader_id != pid:
-                            # print(f"[DISCOVERY_DEBUG] Setting leader to: {pid}")
-                            self.leader_id = pid
-
-                    # Check if this is a new peer or existing one
-                    if pid not in self.peers:
-                        new_peers += 1
-                        # print(f"[DISCOVERY_DEBUG] NEW PEER: {pid} at {h}:{p}")
-                    else:
-                        updated_peers += 1
-                        # print(f"[DISCOVERY_DEBUG] UPDATED PEER: {pid} at {h}:{p}")
-
-                    # Always update the peer information
-                    self.peers[pid] = (h, p)
-                    self.last_seen[pid] = now()
-
-            # print(f"[DISCOVERY_SUMMARY] New: {new_peers}, Updated: {updated_peers}, Total: {len(self.peers)}")
-
-            # Now connect to any peers we're not actively connected to
-            if new_peers > 0:
-                print(f"[DISCOVERY] Establishing connections to {new_peers} new peers...")
-                for e in msg.get("peers", []):
-                    pid, h, p = e["peer_id"], e["host"], e["port"]
-                    is_leader = e.get("is_leader", False)
-
-                    # Skip self and leader (we're already connected to leader)
-                    if pid == self.id or pid == self.leader_id:
-                        continue
-
-                    # Connect to non-leader peers
-                    print(f"[DISCOVERY] Attempting connection to {pid} at {h}:{p}")
-                    threading.Thread(target=self.connect_to_peer, args=(h, p), daemon=True).start()
-
-        elif m == "LEADER_DISCOVERY":
-            # Peer is asking about a leader
-            requested_leader_id = msg.get("leader_id")
-
-            if requested_leader_id == self.leader_id and self.leader_id in self.peers:
-                # We know about this leader
-                leader_host, leader_port = self.peers[self.leader_id]
-                send_json_on_sock(conn, {
-                    "type": "LEADER_INFO",
-                    "sender_id": self.id,
-                    "leader_id": self.leader_id,
-                    "host": leader_host,
-                    "port": leader_port
-                })
-
-        elif m == "LEADER_INFO":
-            # Response to leader discovery request
-            leader_host = msg.get("host")
-            leader_port = msg.get("port")
-            if leader_host and leader_port:
-                print(f"[LEADER_INFO] Connecting to leader at {leader_host}:{leader_port}")
-                threading.Thread(
-                    target=self.connect_to_peer,
-                    args=(leader_host, leader_port),
-                    daemon=True
-                ).start()
-
-        elif m == "HEARTBEAT":
-            # reply ack
-            send_json_on_sock(conn, {"type":"HEARTBEAT_ACK", "sender_id": self.id})
-
-        elif m == "PLAY_REQUEST":
-            # leader tells us which track & absolute start_time (leader wall-clock)
-            track = msg.get("track")
-            start_time = msg.get("start_time")  # leader-walltime (seconds)
-            leader_id = msg.get("leader_id") or sid
-            # convert: local_time_target = start_time + offset (if we have offset leader->this peer)
-            offset = self.clock_offsets.get(leader_id, 0.0)
-            local_target = start_time + offset
-            delay = local_target - now()
-            print(f"[PLAY_REQ] leader={leader_id} track={track} start_time={start_time:.3f} local_target={local_target:.3f} delay={delay:.3f}s")
-            # load and schedule
-            self._prepare_and_schedule_play(track, delay)
-
-        elif m == "PAUSE_REQUEST":
-            # leader tells us to pause at absolute time
-            pause_time = msg.get("pause_time")  # leader-walltime (seconds)
-            leader_id = msg.get("leader_id") or sid
-            # convert to local time
-            offset = self.clock_offsets.get(leader_id, 0.0)
-            local_target = pause_time + offset
-            delay = local_target - now()
-            print(f"[PAUSE_REQ] leader={leader_id} pause_time={pause_time:.3f} local_target={local_target:.3f} delay={delay:.3f}s")
-            # schedule pause
-            self._prepare_and_schedule_pause(delay)
-
-        elif m == "RESUME_REQUEST":
-            # leader tells us to resume at absolute time
-            resume_time = msg.get("resume_time")  # leader-walltime (seconds)
-            leader_id = msg.get("leader_id") or sid
-            # convert to local time
-            offset = self.clock_offsets.get(leader_id, 0.0)
-            local_target = resume_time + offset
-            delay = local_target - now()
-            print(f"[RESUME_REQ] leader={leader_id} resume_time={resume_time:.3f} local_target={local_target:.3f} delay={delay:.3f}s")
-            # schedule resume
-            self._prepare_and_schedule_resume(delay)
-
-        elif m == "NEXT_REQUEST":
-            # leader wants to advance playlist and issue a new PLAY_REQUEST (optional; for P2P we might just use PLAY_REQUEST directly)
-            pass
-
-        elif m == "CLOCK_SYNC_REQUEST":
-            # simple reply with follower_time
-            follower_time = now()
-            send_json_on_sock(conn, {"type":"CLOCK_SYNC_RESPONSE", "sender_id": self.id, "follower_time": follower_time})
-
-        elif m == "CLOCK_SYNC_RESPONSE":
-            # leader side: compute offset if needed (not used automatically here)
-            # For simplicity we handle direct sync path in sync_clock_with_peer()
-            pass
-
-        elif m == "FULL_PEER_LIST":
-            # Leader is sharing the complete peer list
-            print(f"[PEER_DISCOVERY] Received full peer list from leader")
-            new_peers = 0
-            for peer_info in msg.get("peers", []):
-                pid = peer_info["peer_id"]
-                host = peer_info["host"]
-                port = peer_info["port"]
-                is_leader_peer = peer_info.get("is_leader", False)
-
-                if pid == self.id:
-                    continue
-
-                with self.lock:
-                    if pid not in self.peers:
-                        self.peers[pid] = (host, port)
-                        self.last_seen[pid] = now()
-                        new_peers += 1
-
-                        # If this peer is the leader, update leader_id
-                        if is_leader_peer:
-                            self.leader_id = pid
-                            print(f"[PEER_DISCOVERY] Updated leader to {pid}")
-
-            if new_peers > 0:
-                print(f"[PEER_DISCOVERY] Discovered {new_peers} new peers")
-                # Connect to newly discovered peers (except leader, since we're already connected)
-                for peer_info in msg.get("peers", []):
-                    pid = peer_info["peer_id"]
-                    host = peer_info["host"]
-                    port = peer_info["port"]
-                    is_leader_peer = peer_info.get("is_leader", False)
-
-                    if pid == self.id or (is_leader_peer and pid == self.leader_id):
-                        continue
-
-                    with self.lock:
-                        if pid not in self.peers:  # Only connect if not already connected
-                            threading.Thread(
-                                target=self.connect_to_peer,
-                                args=(host, port),
-                                daemon=True
-                            ).start()
-
-        else:
-            # unknown
-            pass
-
-    # --- playback ---
+   # --- playback ---
     """Delegate to AudioPlayer"""
     def _prepare_and_schedule_play(self, track, delay):
         self.player.prepare_and_schedule_play(track, delay)
@@ -552,48 +233,32 @@ class PeerNode:
     def _resume_local(self):
         self.player.resume_immediate()
 
-    # --- leader utilities ---
+    def _stop_local(self):
+        self.player.stop_immediate()
+
+    # === Leader Broadcast Commands ===
     def broadcast_play(self, track, start_time, leader_id=None):
-        # send PLAY_REQUEST to all known peers; ephemeral TCP
         if leader_id is None:
             leader_id = self.id
-        with self.lock:
-            peers_copy = dict(self.peers)
-        for pid,(h,p) in peers_copy.items():
-            try:
-                send_json_to_addr(h, p, {
-                    "type": "PLAY_REQUEST",
-                    "sender_id": self.id,
-                    "leader_id": leader_id,
-                    "track": track,
-                    "start_time": start_time
-                })
-            except:
-                pass
+
+        self.network.broadcast_message("PLAY_REQUEST", {
+            "track": track,
+            "start_time": start_time
+        }, leader_id)
+
         # leader also plays locally at start_time
         local_delay = start_time - now()
         print(f"[LEADER] scheduled {track} at leader_time={start_time:.3f} (in {local_delay:.3f}s)")
-        # schedule own playback
         self._prepare_and_schedule_play(track, local_delay)
 
     def broadcast_pause(self, pause_time, leader_id=None):
         if leader_id is None:
             leader_id = self.id
-        with self.lock:
-            peers_copy = dict(self.peers)
 
-        print(f"[DEBUG] Broadcasting pause to {len(peers_copy)} peers")
-
-        for pid,(h,p) in peers_copy.items():
-            try:
-                send_json_to_addr(h, p, {
-                    "type": "PAUSE_REQUEST",
-                    "sender_id": self.id,
-                    "leader_id": leader_id,
-                    "pause_time": pause_time
-                })
-            except Exception as e:
-                print(f"[DEBUG] Failed to send PAUSE_REQUEST to {pid}: {e}")
+        print(f"[DEBUG] Broadcasting pause to peers")
+        self.network.broadcast_message("PAUSE_REQUEST", {
+            "pause_time": pause_time
+        }, leader_id)
 
         # leader also pauses locally
         local_delay = pause_time - now()
@@ -603,22 +268,30 @@ class PeerNode:
     def broadcast_resume(self, resume_time, leader_id=None):
         if leader_id is None:
             leader_id = self.id
-        with self.lock:
-            peers_copy = dict(self.peers)
-        for pid,(h,p) in peers_copy.items():
-            try:
-                send_json_to_addr(h, p, {
-                    "type": "RESUME_REQUEST",
-                    "sender_id": self.id,
-                    "leader_id": leader_id,
-                    "resume_time": resume_time
-                })
-            except:
-                pass
+
+        self.network.broadcast_message("RESUME_REQUEST", {
+            "resume_time": resume_time
+        }, leader_id)
+
         # leader also resumes locally
         local_delay = resume_time - now()
         print(f"[LEADER] scheduled resume at leader_time={resume_time:.3f} (in {local_delay:.3f}s)")
         self._prepare_and_schedule_resume(local_delay)
+
+    def broadcast_stop(self, stop_time=None, leader_id=None):
+        """Broadcast stop command to all peers"""
+        if leader_id is None:
+            leader_id = self.id
+        if stop_time is None:
+            stop_time = now()
+
+        print(f"[DEBUG] Broadcasting stop to peers")
+        self.network.broadcast_message("STOP_REQUEST", {
+            "stop_time": stop_time
+        }, leader_id)
+
+        # leader also stops locally
+        self._stop_local()
 
     # --- clock sync (optional) ---
     def sync_clock_with_peer(self, pid, host, port):
@@ -637,17 +310,16 @@ class PeerNode:
                 midpoint = t0 + rtt/2.0
                 offset = follower_time - midpoint
                 with self.lock:
-                    self.clock_offsets[pid] = offset
-                    self.last_seen[pid] = now()
+                    self.network.clock_offsets[pid] = offset
+                    self.network.last_seen[pid] = now()
                 print(f"[CLOCK] {pid} rtt={rtt:.4f}s offset={offset:.4f}s")
         except Exception:
             pass
 
     def sync_all_peers(self):
-        with self.lock:
-            peers_copy = dict(self.peers)
+        peers = self.network.get_peers()
         threads = []
-        for pid,(h,p) in peers_copy.items():
+        for pid,(h,p) in peers.items():
             if pid == self.id: continue
             t = threading.Thread(target=self.sync_clock_with_peer, args=(pid,h,p), daemon=True)
             t.start(); threads.append(t)
@@ -678,26 +350,23 @@ class PeerNode:
             leader_lost = False
 
             with self.lock:
-                for pid, last in list(self.last_seen.items()):
+                # Create a copy to avoid modification during iteration
+                peers_copy = dict(self.network.get_peers())
+                last_seen_copy = dict(self.network.last_seen)
+
+                for pid, last in last_seen_copy.items():
                     if pid == self.id:
                         continue
                     if nowt - last > PEER_TIMEOUT:
+                        print(f"[TIMEOUT] Peer {pid} timed out, but keeping for reconnection")
+                        # Don't remove from peers, just mark as needing reconnection
                         removed.append(pid)
-                        if pid in self.peers:
-                            del self.peers[pid]
-                        if pid in self.last_seen:
-                            del self.last_seen[pid]
-                        if pid in self.clock_offsets:
-                            del self.clock_offsets[pid]
 
-                        # Check if the removed peer was the leader
+                        # Check if the timed out peer was the leader
                         if pid == self.leader_id:
                             leader_lost = True
 
-            # Process removals
-            for pid in removed:
-                print("[TIMEOUT] removed", pid)
-
+            # Process leader loss
             if leader_lost:
                 print("[ELECTION] Leader disappeared — starting Bully election")
                 # Start election after a random delay to avoid conflicts
@@ -710,10 +379,10 @@ class PeerNode:
 
         # Get all known peer addresses except self and the lost leader
         peers_to_try = []
-        with self.lock:
-            for pid, (host, port) in self.peers.items():
-                if pid != self.id and pid != self.leader_id:
-                    peers_to_try.append((host, port))
+        peers = self.network.get_peers()  # Use network manager
+        for pid, (host, port) in peers.items():
+            if pid != self.id and pid != self.leader_id:
+                peers_to_try.append((host, port))
 
         # Also try to rediscover from remaining peers
         for host, port in peers_to_try:
@@ -741,36 +410,42 @@ class PeerNode:
 
     # --- helpers for CLI ---
     def show_peers(self):
-        with self.lock:
-            print("=== peers ===")
-            print(f"DEBUG: Total peers in dictionary: {len(self.peers)}")
-            print(f"DEBUG: Peer IDs: {list(self.peers.keys())}")
-            for pid,(h,p) in self.peers.items():
-                age = now() - self.last_seen.get(pid, 0) if self.last_seen.get(pid) else float("inf")
-                off = self.clock_offsets.get(pid, None)
-                leader_flag = " (LEADER)" if pid == self.leader_id else ""
-                print(pid + leader_flag, "->", f"{h}:{p}", f"last={age:.2f}s", f"offset={off:.4f}" if off is not None else "offset=n/a")
-            print("=============")
+        peers = self.network.get_peers()
+        last_seen = self.network.last_seen
+        clock_offsets = self.network.clock_offsets
+
+        print("=== peers ===")
+        print(f"DEBUG: Total peers in dictionary: {len(peers)}")
+        print(f"DEBUG: Peer IDs: {list(peers.keys())}")
+        for pid,(h,p) in peers.items():
+            age = now() - last_seen.get(pid, 0) if last_seen.get(pid) else float("inf")
+            off = clock_offsets.get(pid, None)
+            leader_flag = " (LEADER)" if pid == self.leader_id else ""
+            print(pid + leader_flag, "->", f"{h}:{p}", f"last={age:.2f}s", f"offset={off:.4f}" if off is not None else "offset=n/a")
+        print("=============")
 
     def debug_status(self):
         """Debug method to show current status"""
-        with self.lock:
-            print("=== DEBUG STATUS ===")
-            print(f"My ID: {self.id}")
-            print(f"I am leader: {self.is_leader}")
-            print(f"Current leader_id: {self.leader_id}")
-            print(f"Known peers: {list(self.peers.keys())}")
-            print(f"Bootstrap: {self.bootstrap}")
-            if self.leader_id:
-                if self.leader_id in self.peers:
-                    print(f"Leader connection: {self.peers[self.leader_id]}")
-                else:
-                    print("⚠️  Leader ID known but not in peers!")
+        peers = self.network.get_peers()
+        print("=== DEBUG STATUS ===")
+        print(f"My ID: {self.id}")
+        print(f"I am leader: {self.is_leader}")
+        print(f"Current leader_id: {self.leader_id}")
+        print(f"Known peers: {list(peers.keys())}")
+        print(f"Bootstrap: {self.bootstrap}")
+        if self.leader_id:
+            if self.leader_id in peers:
+                print(f"Leader connection: {peers[self.leader_id]}")
             else:
-                print("⚠️  No leader ID set!")
-            print("===================")
+                print("⚠️  Leader ID known but not in peers!")
+        else:
+            print("⚠️  No leader ID set!")
+        print("===================")
 
     def play_next(self, lead_delay=1.0):
+        # Stop current playback first
+        self.player.stop_immediate()
+
         # advance local pointer and instruct peers to play next song at a future absolute time
         track = self.player.next_track()
         if not track:
@@ -779,7 +454,21 @@ class PeerNode:
         start_time = now() + lead_delay
         self.broadcast_play(track, start_time, leader_id=self.id)
 
+    def play_previous(self, lead_delay=1.0):
+        # Stop current playback first
+        self.player.stop_immediate()
+
+        # Get previous track
+        track = self.player.previous_track()
+        if not track:
+            print("[PLAY] no tracks")
+            return
+        start_time = now() + lead_delay
+        self.broadcast_play(track, start_time, leader_id=self.id)
+
     def play_index(self, index, lead_delay=1.0):
+        self.player.stop_immediate()
+
         track = self.player.play_index(index)
         if not track:
             return
@@ -795,22 +484,22 @@ class PeerNode:
         if self.is_leader:
             self.broadcast_pause(pause_time)
         else:
-            with self.lock:
-                leader_peers = [pid for pid in self.peers.keys() if pid != self.id]
-                if leader_peers:
-                    leader_id = leader_peers[0]  # simply select the first peer as leader
-                    leader_host, leader_port = self.peers[leader_id]
-                    try:
-                        send_json_to_addr(leader_host, leader_port, {
-                            "type": "PAUSE_REQUEST",
-                            "sender_id": self.id,
-                            "pause_time": pause_time
-                        })
-                        print("[PAUSE] sent pause request to leader")
-                    except Exception as e:
-                        print(f"[PAUSE] failed to send request: {e}")
-                else:
-                    print("[PAUSE] no leader found")
+            peers = self.network.get_peers()
+            leader_peers = [pid for pid in peers.keys() if pid != self.id]
+            if leader_peers:
+                leader_id = leader_peers[0]  # simply select the first peer as leader
+                leader_host, leader_port = peers[leader_id]
+                try:
+                    send_json_to_addr(leader_host, leader_port, {
+                        "type": "PAUSE_REQUEST",
+                        "sender_id": self.id,
+                        "pause_time": pause_time
+                    })
+                    print("[PAUSE] sent pause request to leader")
+                except Exception as e:
+                    print(f"[PAUSE] failed to send request: {e}")
+            else:
+                print("[PAUSE] no leader found")
             self._pause_local()
 
     def resume_immediate(self):
@@ -822,23 +511,49 @@ class PeerNode:
         if self.is_leader:
             self.broadcast_resume(resume_time)
         else:
-            with self.lock:
-                leader_peers = [pid for pid in self.peers.keys() if pid != self.id]
-                if leader_peers:
-                    leader_id = leader_peers[0]  # simply select the first peer as leader
-                    leader_host, leader_port = self.peers[leader_id]
-                    try:
-                        send_json_to_addr(leader_host, leader_port, {
-                            "type": "RESUME_REQUEST",
-                            "sender_id": self.id,
-                            "resume_time": resume_time
-                        })
-                        print("[RESUME] sent resume request to leader")
-                    except Exception as e:
-                        print(f"[RESUME] failed to send request: {e}")
-                else:
-                    print("[RESUME] no leader found")
+            peers = self.network.get_peers()
+            leader_peers = [pid for pid in peers.keys() if pid != self.id]
+            if leader_peers:
+                leader_id = leader_peers[0]  # simply select the first peer as leader
+                leader_host, leader_port = peers[leader_id]
+                try:
+                    send_json_to_addr(leader_host, leader_port, {
+                        "type": "RESUME_REQUEST",
+                        "sender_id": self.id,
+                        "resume_time": resume_time
+                    })
+                    print("[RESUME] sent resume request to leader")
+                except Exception as e:
+                    print(f"[RESUME] failed to send request: {e}")
+            else:
+                print("[RESUME] no leader found")
             self._resume_local()
+
+    def stop_immediate(self):
+        """Stop playback immediately"""
+        if not self.player.get_playback_state()['is_playing']:
+            print("[STOP] not currently playing")
+            return
+
+        stop_time = now()
+        if self.is_leader:
+            self.broadcast_stop(stop_time)
+        else:
+            peers = self.network.get_peers()
+            if self.leader_id in peers:
+                leader_host, leader_port = peers[self.leader_id]
+                try:
+                    send_json_to_addr(leader_host, leader_port, {
+                        "type": "STOP_REQUEST",
+                        "sender_id": self.id,
+                        "stop_time": stop_time
+                    })
+                    print("[STOP] sent stop request to leader")
+                except Exception as e:
+                    print(f"[STOP] failed to send request to leader: {e}")
+            else:
+                print("[STOP] no leader found")
+            self._stop_local()
 
     def schedule_pause(self, delay=1.0):
         pause_time = now() + delay
@@ -895,7 +610,7 @@ def main():
 
     print("\nCommands:")
     print("  Network    : peers, sync, debug, force_election, discover")
-    print("  Playback   : playnext, play <index>, pause, resume, stop, next, prev")
+    print("  Playback   : play <index>, pause, resume, stop, next, prev")
     print("  Scheduling : schedule_pause <delay>, schedule_resume <delay>")
     print("  Info       : list, status")
     print("  Control    : exit")
@@ -906,12 +621,6 @@ def main():
 
             if cmd[0] == "peers":
                 node.show_peers()
-
-            elif cmd[0] == "playnext":
-                if not node.is_leader:
-                    print("only leader can schedule global play")
-                else:
-                    node.play_next(lead_delay=1.0)
 
             elif cmd[0] == "play":
                 if not node.is_leader:
@@ -991,26 +700,24 @@ def main():
 
             elif cmd[0] == "stop":
                 # New command to stop playback completely
-                node.player.stop_immediate()
-                print("Playback stopped")
+                if not node.is_leader:
+                    print("only leader can schedule global play")
+                else:
+                    node.stop_immediate()
+                    print("Playback stopped")
 
             elif cmd[0] == "next":
-                # Play next track immediately (local only)
-                track = node.player.next_track()
-                if track:
-                    print(f"Playing next track: {track}")
-                    node.player.play_immediate(track)
+                if not node.is_leader:
+                    print("only leader can schedule global play")
                 else:
-                    print("No tracks available")
+                    node.play_next(lead_delay=1.0)
 
             elif cmd[0] == "prev":
-                # Play previous track immediately (local only)
-                track = node.player.previous_track()
-                if track:
-                    print(f"Playing previous track: {track}")
-                    node.player.play_immediate(track)
+                # Play previous track synchronized across all nodes
+                if not node.is_leader:
+                    print("only leader can schedule global play")
                 else:
-                    print("No tracks available")
+                    node.play_previous(lead_delay=1.0)
 
             elif cmd[0] == "discover":
                 # Manual discovery command for debugging

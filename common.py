@@ -36,4 +36,36 @@ def send_json_to_addr(host, port, obj, timeout=3.0):
                 response_obj = json.loads(resp.decode("utf-8").split("\n")[0])
                 # print(f"[NETWORK_DEBUG] Parsed response type: {response_obj.get('type')}")
                 return response_obj
-           
+            except Exception as e:
+                print(f"[NETWORK_DEBUG] Failed to parse response: {e}")
+                return None
+        return None
+    except Exception as e:
+        print(f"[NETWORK_DEBUG] Failed to send {obj.get('type')} to {host}:{port}: {e}")
+        return None
+
+def send_json_on_sock(sock, obj):
+    data = json.dumps(obj).encode("utf-8") + b"\n"
+    sock.sendall(data)
+    # print(f"[NETWORK_DEBUG] Sent {obj.get('type')} via existing socket")
+
+def recv_json_from_sock(sock):
+    buf = b""
+    while True:
+        try:
+            chunk = sock.recv(BUFFER_SIZE)
+            if not chunk:
+                return None
+            buf += chunk
+            if b"\n" in buf:
+                raw, rest = buf.split(b"\n", 1)
+                try:
+                    obj = json.loads(raw.decode("utf-8"))
+                    # print(f"[NETWORK_DEBUG] Received {obj.get('type')} via socket")
+                    return obj
+                except Exception as e:
+                    print(f"[NETWORK_DEBUG] Failed to parse message: {e}")
+                    return None
+        except Exception as e:
+            print(f"[NETWORK_DEBUG] Error receiving data: {e}")
+            return None
