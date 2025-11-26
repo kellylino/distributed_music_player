@@ -70,7 +70,7 @@ class BullyElection:
 
         # Wait for responses (with timeout)
         for t in threads:
-            t.join(timeout=2.0)
+            t.join(timeout=1.0)
 
         # If no responses from higher peers, I become the leader
         if not election_responses:
@@ -101,7 +101,7 @@ class BullyElection:
         if on_new_leader_callback:
             on_new_leader_callback(self.node_id)
 
-    def _wait_for_coordinator(self, on_new_leader_callback, timeout=10.0):
+    def _wait_for_coordinator(self, on_new_leader_callback, timeout=2.0):
         """Wait for coordinator message with timeout"""
         start_time = now()
 
@@ -117,7 +117,7 @@ class BullyElection:
             print(f"[ELECTION] Coordinator timeout, restarting election")
             self.start_election(on_new_leader_callback)
 
-    def handle_election_message(self, msg, conn, send_response_callback):
+    def handle_election_message(self, msg, send_response_callback):
         """Handle incoming election-related messages"""
         msg_type = msg.get("type")
         sender_id = msg.get("sender_id")

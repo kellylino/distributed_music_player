@@ -4,7 +4,7 @@ import socket
 
 BUFFER_SIZE = 65536
 
-def send_json_to_addr(host, port, obj, timeout=3.0):
+def send_json_to_addr(host, port, obj, timeout=1.0):
     # print(f"[NETWORK_DEBUG] SENDING {obj.get('type')} to {host}:{port}")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -21,7 +21,7 @@ class MessageHandler:
         elif m == "ELECTION":
             def send_response(response_msg):
                 send_json_on_sock(conn, response_msg)
-            self.election.handle_election_message(msg, conn, send_response)
+            self.election.handle_election_message(msg, send_response)
             return
 
         # Handle network messages
@@ -122,4 +122,94 @@ class MessageHandler:
             self.network.update_peer_info(pid, h, p, is_leader)
 
             if is_leader and self.election.leader_id != pid:
-       
+                self.election.leader_id = pid
+
+    def _handle_heartbeat(self, conn):
+        send_json_on_sock(conn, {"type": "HEARTBEAT_ACK", "sender_id": self.node_id})
+
+    def _handle_play_request(self, msg):
+        track = msg.get("track")
+        start_time = msg.get("start_time")
+        leader_id = msg.get("leader_id")
+
+        # Calculate delay and schedule playback
+        delay = start_time - time.time()
+        self.playback.prepare_and_schedule_play(track, delay)
+
+    def _handle_pause_request(self, msg):
+        pause_time = msg.get("pause_time")
+        delay = pause_time - time.time()
+        self.playback.prepare_and_schedule_pause(delay)
+
+    def _handle_resume_request(self, msg):
+        resume_time = msg.get("resume_time")
+        delay = resume_time - time.time()
+        self.playback.prepare_and_schedule_resume(delay)
+
+    def _handle_stop_request(self, msg):
+        stop_time = msg.get("stop_time")
+
+        # Calculate delay and schedule stop
+        delay = stop_time - time.time()
+        self.playback.prepare_and_schedule_stop(delay)
+
+    def _handle_leader_discovery(self, msg, conn):
+        requested_leader_id = msg.get("leader_id")
+        if requested_leader_id == self.election.leader_id:
+            leader_host, leader_port = self.network.get_peer_address(self.election.leader_id)
+            if leader_host and leader_port:
+                send_json_on_sock(conn, {
+                    "type": "LEADER_INFO",
+                    "sender_id": self.node_id,
+                    "leader_id": self.election.leader_id,
+                    "host": leader_host,
+                    "port": leader_port
+                })
+
+    def _handle_clock_sync_request(self, msg, conn):
+        follower_time = time.time()
+        send_json_on_sock(conn, {
+            "type": "CLOCK_SYNC_RESPONSE",
+            "sender_id": self.node_id,
+            "follower_time": follower_time
+        })
+
+    def _handle_coordinator_message(self, msg, conn):
+        """Handle COORDINATOR message from new leader"""
+        new_leader_id = msg.get("leader_id")
+        leader_host = msg.get("host")
+        leader_port = msg.get("port")
+
+        print(f"[ELECTION] Received COORDINATOR from new leader: {new_leader_id}")
+
+        self.election.leader_id = new_leader_id
+        self.election.is_leader = (new_leader_id == self.node_id)
+
+        if leader_host and leader_port:
+            self.network.update_peer_info(new_leader_id, leader_host, leader_port, True)
+            print(f"[ELECTION] Added new leader {new_leader_id} to peer list at {leader_host}:{leader_port}")
+
+            if new_leader_id != self.node_id:
+                try:
+                    self.network.connect_to_peer(leader_host, leader_port)
+                    print(f"[ELECTION] Connected to new leader {new_leader_id}")
+                except Exception as e:
+                    print(f"[ELECTION] Failed to connect to new leader: {e}")
+    def broadcast_reconnect_request(self):
+        """Broadcast reconnect request to all known peers"""
+        peers = self.network.get_peers()
+
+        for pid, (host, port) in peers.items():
+            if pid == self.node_id:
+                continue
+
+            try:
+                send_json_to_addr(host, port, {
+                    "type": "RECONNECT_REQUEST",
+                    "sender_id": self.node_id,
+                    "host": self.network.host,
+                    "port": self.network.port
+                })
+                print(f"[RECONNECT] Sent reconnect request to {pid}")
+            except Exception as e:
+                print(f"[RECONNECT] Failed to send to {pid}: {e}")

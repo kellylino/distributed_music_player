@@ -4,16 +4,17 @@ import sys
 import subprocess
 import time
 import threading
+import pygame
+
+from pydub import AudioSegment
+from pydub.playback import _play_with_simpleaudio as play_audio_pydub
 
 # choose audio backend: try pygame first, else pydub
 AUDIO_BACKEND = None
 try:
-    import pygame
     AUDIO_BACKEND = "pygame"
 except Exception:
     try:
-        from pydub import AudioSegment
-        from pydub.playback import _play_with_simpleaudio as play_audio_pydub
         AUDIO_BACKEND = "pydub"
     except Exception:
         AUDIO_BACKEND = None
@@ -338,4 +339,52 @@ class AudioPlayer:
             try:
                 print(f"[STOP] terminating system player process {self._system_player.pid}")
                 self._system_player.terminate()
-              
+                self._system_player.wait(timeout=1.0)
+                self._system_player = None
+                print("[STOP] system player terminated successfully")
+            except Exception as e:
+                print(f"[STOP_ERR] failed to terminate system player: {e}")
+                try:
+                    self._system_player.kill()
+                    self._system_player = None
+                except:
+                    pass
+
+        with self.lock:
+            self.is_playing = False
+            self.current_track = None
+            self.pause_position = 0.0
+            self.play_start_time = 0.0
+            print("[STOP] playback state reset")
+
+    def next_track(self):
+        """Advance to next track in playlist"""
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = (self.current_index + 1) % len(self.playlist)
+            return self.playlist[self.current_index]
+
+    def previous_track(self):
+        """Go to previous track in playlist"""
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = (self.current_index - 1) % len(self.playlist)
+            return self.playlist[self.current_index]
+
+    def play_index(self, index):
+        """Play track at specific index"""
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = index % len(self.playlist)
+            return self.playlist[self.current_index]
+
+    def get_current_position(self):
+        """Get current playback position in seconds"""
+        with self.lock:
+            if self.is_playing:
+                return now() - self.play_start_time
+            else:
+                return self.pause_position

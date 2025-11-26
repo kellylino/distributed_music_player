@@ -4,7 +4,7 @@ import threading
 import time
 import random
 
-from common import send_json_to_addr, send_json_on_sock, recv_json_from_sock
+from common import send_json_to_addr, recv_json_from_sock
 
 class NetworkManager:
     def __init__(self, host, port, node_id, on_message_callback, on_peer_update_callback):
@@ -179,4 +179,4 @@ class NetworkManager:
     def update_peer_info(self, peer_id, host, port, is_leader=False):
         with self.lock:
             self.peers[peer_id] = (host, port)
-            self.last_seen[peer_id] = time.time(
+            self.last_seen[peer_id] = time.time()

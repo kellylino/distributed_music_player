@@ -14,10 +14,10 @@ from message_handler import MessageHandler
 
 MUSIC_DIR = "music"
 
-HEARTBEAT_INTERVAL = 2.0
+HEARTBEAT_INTERVAL = 1.0
 MONITOR_INTERVAL = 1.0
-SYNC_INTERVAL = 4.0
-PEER_TIMEOUT = 4.0
+SYNC_INTERVAL = 1.0
+PEER_TIMEOUT = 2.0
 
 def now():
     return time.time()
