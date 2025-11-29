@@ -1,6 +1,7 @@
 # election.py
 import threading
 import time
+import uuid
 
 from common import send_json_to_addr
 
@@ -10,8 +11,8 @@ def now():
 class BullyElection:
     def __init__(self, node_id, peers, get_peer_address, is_leader=False, leader_id=None):
         self.node_id = node_id
-        self.peers = peers  # This should be a reference to the node's peers dict
-        self.get_peer_address = get_peer_address  # Function to get (host, port) for a peer_id
+        self.peers = peers
+        self.get_peer_address = get_peer_address
         self.is_leader = is_leader
         self.leader_id = leader_id or (node_id if is_leader else None)
         self.election_in_progress = False
@@ -27,9 +28,15 @@ class BullyElection:
 
         print("[ELECTION] Starting Bully algorithm election...")
 
-        # Get all known peers with higher IDs than me
-        all_known_peers = list(self.peers.keys()) + [self.node_id]
-        higher_peers = [pid for pid in all_known_peers if pid > self.node_id]
+        my_uuid = uuid.UUID(self.node_id)
+        higher_peers = []
+        for peer_id in self.peers.keys():
+            try:
+                peer_uuid = uuid.UUID(peer_id)
+                if peer_uuid > my_uuid:
+                    higher_peers.append(peer_id)
+            except ValueError:
+                print(f"[ELECTION_WARNING] Invalid peer ID: {peer_id}")
 
         print(f"[ELECTION] My ID: {self.node_id}, Higher peers: {higher_peers}")
 
@@ -117,7 +124,7 @@ class BullyElection:
             print(f"[ELECTION] Coordinator timeout, restarting election")
             self.start_election(on_new_leader_callback)
 
-    def handle_election_message(self, msg, send_response_callback):
+    def _handle_election_message(self, msg, send_response_callback):
         """Handle incoming election-related messages"""
         msg_type = msg.get("type")
         sender_id = msg.get("sender_id")
@@ -130,11 +137,12 @@ class BullyElection:
             # Reply with answer
             send_response_callback({
                 "type": "ELECTION_ANSWER",
+                # "sender_id": sender_id,
                 "sender_id": self.node_id
             })
 
             # Start my own election after a short delay
-            threading.Timer(0.5, self.start_election).start()
+            threading.Timer(0.1, self.start_election).start()
 
         elif msg_type == "COORDINATOR":
             # Received coordinator announcement from new leader
@@ -152,10 +160,28 @@ class BullyElection:
             if new_leader_id not in self.peers and leader_host and leader_port:
                 self.peers[new_leader_id] = (leader_host, leader_port)
 
-    def announce_leadership(self, send_to_peer_callback):
-        """Announce to all peers that I am the new leader"""
-        print("[ANNOUNCE] Announcing myself as new leader to all peers")
+    def announce_leadership(self):
+        """Announce this node as the new leader to all peers"""
+        coordinator_msg = {
+            "type": "COORDINATOR",
+            "sender_id": self.node_id,
+            "leader_id": self.node_id,
+            "host": self.get_peer_address(self.node_id)[0],
+            "port": self.get_peer_address(self.node_id)[1]
+        }
 
+        for peer_id in self.peers:
+            if peer_id == self.node_id:
+                continue
+            host, port = self.get_peer_address(peer_id)
+            if host and port:
+                try:
+                    send_json_to_addr(host, port, coordinator_msg)
+                except Exception as e:
+                    print(f"[ELECTION] Failed to announce to {peer_id}: {e}")
+
+
+    def announce_leadership(self, send_to_peer_callback):
         peers_copy = dict(self.peers)
 
         for pid in peers_copy:
@@ -163,7 +189,7 @@ class BullyElection:
                 "type": "COORDINATOR",
                 "sender_id": self.node_id,
                 "leader_id": self.node_id,
-                "host": None,  # These will be filled by the callback
+                "host": None,
                 "port": None
             })
 
@@ -177,7 +203,7 @@ class BullyElection:
             }
 
     def update_leader(self, new_leader_id):
-        """Update leader information (e.g., from external source)"""
+        """Update leader information"""
         with self.lock:
             old_leader = self.leader_id
             self.leader_id = new_leader_id

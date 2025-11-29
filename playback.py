@@ -1,23 +1,10 @@
 # playback.py
 import os
-import sys
-import subprocess
 import time
 import threading
 import pygame
 
-from pydub import AudioSegment
-from pydub.playback import _play_with_simpleaudio as play_audio_pydub
-
-# choose audio backend: try pygame first, else pydub
-AUDIO_BACKEND = None
-try:
-    AUDIO_BACKEND = "pygame"
-except Exception:
-    try:
-        AUDIO_BACKEND = "pydub"
-    except Exception:
-        AUDIO_BACKEND = None
+AUDIO_BACKEND = "pygame"
 
 MUSIC_DIR = "music"
 
@@ -27,7 +14,6 @@ def now():
 class AudioPlayer:
     def __init__(self, music_dir=MUSIC_DIR):
         self.music_dir = music_dir
-        self._system_player = None
 
         # Playback state
         self.playlist = self._scan_music()
@@ -57,9 +43,6 @@ class AudioPlayer:
     def get_playlist(self):
         return self.playlist.copy()
 
-    def get_current_track(self):
-        return self.current_track
-
     def get_playback_state(self):
         with self.lock:
             return {
@@ -70,30 +53,6 @@ class AudioPlayer:
                 'play_start_time': self.play_start_time
             }
 
-    def _play_with_system_command(self, local_path):
-        """Fallback to system audio player"""
-        try:
-            if sys.platform == "darwin":  # macOS
-                self._system_player = subprocess.Popen(['afplay', local_path],
-                                                     stdout=subprocess.DEVNULL,
-                                                     stderr=subprocess.DEVNULL)
-            elif sys.platform == "linux":  # Linux
-                self._system_player = subprocess.Popen(['aplay', local_path],
-                                                     stdout=subprocess.DEVNULL,
-                                                     stderr=subprocess.DEVNULL)
-            elif sys.platform == "win32":  # Windows
-                self._system_player = subprocess.Popen(['ffplay', '-nodisp', '-autoexit', local_path],
-                                                     stdout=subprocess.DEVNULL,
-                                                     stderr=subprocess.DEVNULL)
-            else:
-                print("[PLAY_ERR] Unsupported platform for system audio")
-                return False
-            print("[PLAY] started with system command")
-            return True
-        except Exception as e:
-            print(f"[PLAY_ERR] System command failed: {e}")
-            return False
-
     def _start_play_local(self, track):
         local_path = os.path.join(self.music_dir, track) if track else None
 
@@ -101,7 +60,7 @@ class AudioPlayer:
             print(f"[PLAY_ERR] Track file not found: {track}")
             return False
 
-        self._pause_local()
+        # self._pause_local()
 
         # update status
         with self.lock:
@@ -125,16 +84,12 @@ class AudioPlayer:
                 if pygame.mixer.music.get_busy():
                     print(f"[PLAY] successfully started with pygame: {track}")
                     return True
-                else:
-                    print("[PLAY_ERR] Pygame: Music loaded but not playing")
-                    return self._play_with_system_command(local_path)
 
             except Exception as e:
                 print(f"[PLAY_ERR] Pygame failed: {e}")
-                return self._play_with_system_command(local_path)
+                # return self._play_with_system_command(local_path)
         else:
-            # use system command if pygame non exist
-            return self._play_with_system_command(local_path)
+            print(f"[PLAY_ERR] Pygame failed: {e}")
 
     def _start_play_local_from_position(self, track, position):
         local_path = os.path.join(self.music_dir, track) if track else None
@@ -186,21 +141,6 @@ class AudioPlayer:
             except Exception as e:
                 print(f"[PAUSE_ERR] pygame pause failed: {e}")
 
-        if hasattr(self, '_system_player') and self._system_player:
-            try:
-                print(f"[PAUSE] terminating system player process {self._system_player.pid}")
-                self._system_player.terminate()
-                self._system_player.wait(timeout=1.0)
-                self._system_player = None
-                print("[PAUSE] system player terminated successfully")
-            except Exception as e:
-                print(f"[PAUSE_ERR] failed to terminate system player: {e}")
-                try:
-                    self._system_player.kill()
-                    self._system_player = None
-                except:
-                    pass
-
         with self.lock:
             if self.is_playing:
                 elapsed = now() - self.play_start_time
@@ -234,69 +174,48 @@ class AudioPlayer:
                 self._start_play_local_from_position(self.current_track, self.pause_position)
                 return
 
-        if hasattr(self, '_system_player') and self._system_player is None and self.pause_position > 0:
-            print(f"[RESUME] restarting system player from {self.pause_position:.2f}s")
-            self._start_play_local_from_position(self.current_track, self.pause_position)
-            return
-
         print("[RESUME] restarting from beginning")
         self._start_play_local(self.current_track)
 
     # --- Public API ---
 
-    def prepare_and_schedule_play(self, track, delay):
-        # Preload: load file to reduce startup jitter
+    def prepare_and_schedule_play(self, track):
         local_path = os.path.join(self.music_dir, track) if track else None
         if local_path and os.path.isfile(local_path):
-            # Preload: for pygame we'll just load before waiting
             if AUDIO_BACKEND == "pygame":
                 try:
                     pygame.mixer.music.load(local_path)
                 except Exception as e:
                     print("[AUDIO] load failed:", e)
             else:
-                # pydub loads when actually playing
+                print("[Error] no pyname abckend")
                 pass
         else:
             print("[AUDIO] track missing locally:", track)
 
-        # if delay negative or small negative, play immediately
-        if delay <= 0:
-            self._start_play_local(track)
-        else:
-            threading.Thread(target=self._delayed_play_thread, args=(track, delay), daemon=True).start()
+        threading.Thread(target=self._delayed_play_thread, args=(track,), daemon=True).start()
 
-    def _delayed_play_thread(self, track, delay):
+    def _delayed_play_thread(self, track):
         # Sleep until target, then start
-        time.sleep(delay)
+        time.sleep(0.5)
         self._start_play_local(track)
 
     def prepare_and_schedule_pause(self, delay):
-        if delay <= 0:
-            self._pause_local()
-        else:
-            threading.Thread(target=self._delayed_pause_thread, args=(delay,), daemon=True).start()
+        threading.Thread(target=self._delayed_pause_thread, args=(delay,), daemon=True).start()
 
     def _delayed_pause_thread(self, delay):
         time.sleep(delay)
         self._pause_local()
 
     def prepare_and_schedule_resume(self, delay):
-        if delay <= 0:
-            self._resume_local()
-        else:
-            threading.Thread(target=self._delayed_resume_thread, args=(delay,), daemon=True).start()
+        threading.Thread(target=self._delayed_resume_thread, args=(delay,), daemon=True).start()
 
     def _delayed_resume_thread(self, delay):
         time.sleep(delay)
         self._resume_local()
 
     def prepare_and_schedule_stop(self, delay):
-        """Schedule stop for future synchronization"""
-        if delay <= 0:
-            self.stop_immediate()
-        else:
-            threading.Thread(target=self._delayed_stop_thread, args=(delay,), daemon=True).start()
+        threading.Thread(target=self._delayed_stop_thread, args=(delay,), daemon=True).start()
 
     def _delayed_stop_thread(self, delay):
         """Thread for delayed stop"""
@@ -320,7 +239,6 @@ class AudioPlayer:
         self._stop_local()
 
     def _stop_local(self):
-        """Stop playback immediately (local only)"""
         print(f"[STOP] stopping playback at local_time={now():.3f}")
 
         with self.lock:
@@ -334,21 +252,6 @@ class AudioPlayer:
                 print("[STOP] pygame music stopped")
             except Exception as e:
                 print(f"[STOP_ERR] pygame stop failed: {e}")
-
-        if hasattr(self, '_system_player') and self._system_player:
-            try:
-                print(f"[STOP] terminating system player process {self._system_player.pid}")
-                self._system_player.terminate()
-                self._system_player.wait(timeout=1.0)
-                self._system_player = None
-                print("[STOP] system player terminated successfully")
-            except Exception as e:
-                print(f"[STOP_ERR] failed to terminate system player: {e}")
-                try:
-                    self._system_player.kill()
-                    self._system_player = None
-                except:
-                    pass
 
         with self.lock:
             self.is_playing = False

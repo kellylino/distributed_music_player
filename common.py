@@ -4,15 +4,13 @@ import socket
 
 BUFFER_SIZE = 65536
 
-def send_json_to_addr(host, port, obj, timeout=1.0):
-    # print(f"[NETWORK_DEBUG] SENDING {obj.get('type')} to {host}:{port}")
+def send_json_to_addr(host, port, obj, timeout=1.5):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((host, port))
         data = json.dumps(obj).encode("utf-8") + b"\n"
         s.sendall(data)
-        # print(f"[NETWORK_DEBUG] Successfully sent {obj.get('type')} to {host}:{port}")
 
         # try read optional response
         resp = b""
@@ -20,7 +18,6 @@ def send_json_to_addr(host, port, obj, timeout=1.0):
             chunk = s.recv(BUFFER_SIZE)
             if chunk:
                 resp = chunk
-                # print(f"[NETWORK_DEBUG] Received response of {len(chunk)} bytes from {host}:{port}")
         except socket.timeout:
             print(f"[NETWORK_DEBUG] Timeout waiting for response from {host}:{port}")
         except Exception as e:
@@ -34,7 +31,6 @@ def send_json_to_addr(host, port, obj, timeout=1.0):
         if resp:
             try:
                 response_obj = json.loads(resp.decode("utf-8").split("\n")[0])
-                # print(f"[NETWORK_DEBUG] Parsed response type: {response_obj.get('type')}")
                 return response_obj
             except Exception as e:
                 print(f"[NETWORK_DEBUG] Failed to parse response: {e}")
@@ -47,7 +43,6 @@ def send_json_to_addr(host, port, obj, timeout=1.0):
 def send_json_on_sock(sock, obj):
     data = json.dumps(obj).encode("utf-8") + b"\n"
     sock.sendall(data)
-    # print(f"[NETWORK_DEBUG] Sent {obj.get('type')} via existing socket")
 
 def recv_json_from_sock(sock):
     buf = b""
@@ -61,7 +56,6 @@ def recv_json_from_sock(sock):
                 raw, rest = buf.split(b"\n", 1)
                 try:
                     obj = json.loads(raw.decode("utf-8"))
-                    # print(f"[NETWORK_DEBUG] Received {obj.get('type')} via socket")
                     return obj
                 except Exception as e:
                     print(f"[NETWORK_DEBUG] Failed to parse message: {e}")
