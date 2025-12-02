@@ -219,7 +219,7 @@ class AudioPlayer:
     def _delayed_stop_thread(self, delay):
         """Thread for delayed stop"""
         time.sleep(delay)
-        self.stop_immediate()
+        self._stop_local()
 
     # def play_immediate(self, track):
     #     """Play a track immediately"""
