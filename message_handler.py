@@ -181,7 +181,7 @@ class MessageHandler:
         delay = current_time - pause_time
         print(f"[Pause delay] {delay}")
 
-        # delay = max(delay, 0.1)
+        delay = max(delay, 0.1)
         self.playback.prepare_and_schedule_pause(delay)
 
     def _handle_resume_request(self, msg, conn):
