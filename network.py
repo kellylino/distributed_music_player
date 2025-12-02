@@ -34,7 +34,6 @@ class NetworkManager:
         threading.Thread(target=self._network_sync_loop, daemon=True).start()
 
     def connect_to_peer(self, host, port):
-        # print(f"[CONNECT_DEBUG] Attempting to connect to {host}:{port}")
         try:
             resp = send_json_to_addr(host, port, {
                 "type": "HELLO",
@@ -56,7 +55,6 @@ class NetworkManager:
                     "type": "DISCOVERY_REQUEST",
                     "sender_id": self.node_id
                 })
-
                 return pid, resp
 
         except Exception as e:
@@ -248,7 +246,7 @@ class ConnectionManager:
                 sock.settimeout(1.0)
                 sock.connect((host, port))
 
-                sock.settimeout(2.0)  # No timeout for persistent connections
+                sock.settimeout(2.0)
 
                 self.connections[peer_id] = sock
                 # print(f"[CONN] Established persistent connection to {peer_id}")
@@ -279,7 +277,7 @@ class ConnectionManager:
 
     def close_all(self):
         with self.lock:
-            for peer_id, sock in self.connections.items():
+            for sock in self.connections.items():
                 try:
                     sock.close()
                 except:

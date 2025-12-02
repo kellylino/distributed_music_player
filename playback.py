@@ -5,7 +5,6 @@ import threading
 import pygame
 
 AUDIO_BACKEND = "pygame"
-
 MUSIC_DIR = "music"
 
 def now():
@@ -30,8 +29,8 @@ class AudioPlayer:
         if AUDIO_BACKEND == "pygame":
             pygame.mixer.init()
 
-        print(f"[AUDIO] Backend: {AUDIO_BACKEND}")
-        print(f"[AUDIO] Found {len(self.playlist)} tracks")
+        # print(f"[AUDIO] Backend: {AUDIO_BACKEND}")
+        # print(f"[AUDIO] Found {len(self.playlist)} tracks")
 
     def _scan_music(self):
         if not os.path.isdir(self.music_dir):
@@ -80,7 +79,7 @@ class AudioPlayer:
                 pygame.mixer.music.load(local_path)
                 pygame.mixer.music.play()
 
-                time.sleep(0.3)
+                time.sleep(0.1)
                 if pygame.mixer.music.get_busy():
                     print(f"[PLAY] successfully started with pygame: {track}")
                     return True
@@ -113,7 +112,7 @@ class AudioPlayer:
                     self.play_start_time = now() - position
                     self.pause_position = 0.0
 
-                time.sleep(0.3)
+                time.sleep(0.1)
                 if pygame.mixer.music.get_busy():
                     print(f"[RESUME] successfully resumed with pygame from {position:.2f}s")
                     return True
@@ -222,21 +221,21 @@ class AudioPlayer:
         time.sleep(delay)
         self.stop_immediate()
 
-    def play_immediate(self, track):
-        """Play a track immediately"""
-        return self._start_play_local(track)
+    # def play_immediate(self, track):
+    #     """Play a track immediately"""
+    #     return self._start_play_local(track)
 
-    def pause_immediate(self):
-        """Pause playback immediately"""
-        self._pause_local()
+    # def pause_immediate(self):
+    #     """Pause playback immediately"""
+    #     self._pause_local()
 
-    def resume_immediate(self):
-        """Resume playback immediately"""
-        self._resume_local()
+    # def resume_immediate(self):
+    #     """Resume playback immediately"""
+    #     self._resume_local()
 
-    def stop_immediate(self):
-        """Stop playback immediately"""
-        self._stop_local()
+    # def stop_immediate(self):
+    #     """Stop playback immediately"""
+    #     self._stop_local()
 
     def _stop_local(self):
         print(f"[STOP] stopping playback at local_time={now():.3f}")

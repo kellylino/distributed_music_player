@@ -27,12 +27,14 @@ class PeerNode:
 
         # Initialize modules
         self.player = AudioPlayer()
+
         self.network = NetworkManager(
             host, port, self.id,
             on_message_callback=self._handle_message,
             on_peer_update_callback=self._on_peer_update,
             on_leader_update_callback=self._update_leader_info
         )
+
         self.election = BullyElection(
             node_id=self.id,
             peers=self.network.peers,
@@ -40,6 +42,7 @@ class PeerNode:
             is_leader=is_leader,
             leader_id=self.id if is_leader else None
         )
+
         self.message_handler = MessageHandler(
             self.id, self.network, self.election, self.player
         )
@@ -172,7 +175,6 @@ class PeerNode:
         }, leader_id)
 
     def broadcast_resume(self, resume_time, leader_id):
-
         self.network.broadcast_message("RESUME_REQUEST", {
             "resume_time": resume_time
         }, leader_id)
@@ -253,7 +255,7 @@ class PeerNode:
 
     def play_next(self, lead_delay=0.5):
         # Stop current playback first
-        self.player.stop_immediate()
+        self.stop_immediate()
 
         # advance local pointer and instruct peers to play next song at a future absolute time
         track = self.player.next_track()
@@ -265,7 +267,7 @@ class PeerNode:
 
     def play_previous(self, lead_delay=0.5):
         # Stop current playback first
-        self.player.stop_immediate()
+        self.stop_immediate()
 
         # Get previous track
         track = self.player.previous_track()
@@ -276,7 +278,7 @@ class PeerNode:
         self.broadcast_play(track, start_time, leader_id=self.id)
 
     def play_index(self, index, lead_delay=0.5):
-        self.player.stop_immediate()
+        self.stop_immediate()
 
         track = self.player.play_index(index)
         if not track:
@@ -354,10 +356,9 @@ def main():
 
     # if bootstrap provided, do connect
     if bootstrap:
-        # convert port to int
         threading.Thread(target=node.network.connect_to_peer, args=(bootstrap[0], int(bootstrap[1])), daemon=True).start()
 
-    print("\nCommands:")
+    print("\n  Commands:")
     print("  Network    : peers, debug")
     print("  Playback   : play <index>, pause, resume, stop, next, prev")
     print("  Info       : list, status")
@@ -470,12 +471,14 @@ def main():
                 break
 
             else:
-                print("\nUnknown command")
+                print("======================")
+                print("\n  Unknown command")
                 print("  Available commands:")
                 print("  Network    : peers, debug")
                 print("  Playback   : play <index>, pause, resume, stop, next, prev")
                 print("  Info       : list, status")
                 print("  Control    : exit")
+                print("======================")
 
     except KeyboardInterrupt:
         pass
