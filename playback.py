@@ -99,9 +99,8 @@ class AudioPlayer:
 
         if AUDIO_BACKEND == "pygame":
             try:
-                pygame.mixer.quit()
-                time.sleep(0.1)
-                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.stop()
 
                 pygame.mixer.music.load(local_path)
                 pygame.mixer.music.play(start=position)
@@ -112,7 +111,7 @@ class AudioPlayer:
                     self.play_start_time = now() - position
                     self.pause_position = 0.0
 
-                time.sleep(0.1)
+                time.sleep(0.05)
                 if pygame.mixer.music.get_busy():
                     print(f"[RESUME] successfully resumed with pygame from {position:.2f}s")
                     return True

@@ -149,7 +149,9 @@ class MessageHandler:
         # If we discovered a leader and we're not the leader, request state sync
         if leader_found and not self.election.is_leader:
             print(f"[DISCOVERY] Leader discovered through discovery response, requesting state sync")
-            threading.Timer(0.1, lambda: self._request_state_sync()).start()
+            # threading.Timer(0.1, lambda: self._request_state_sync()).start()
+            # Use a thread instead of Timer
+            threading.Thread(target=self._request_state_sync, daemon=True).start()
 
     def _handle_heartbeat(self, msg, conn):
         send_json_on_sock(conn, {
@@ -181,19 +183,19 @@ class MessageHandler:
         delay = current_time - pause_time
         print(f"[Pause delay] {delay}")
 
-        delay = max(delay, 0.1)
+        delay = max(delay, 0.3)
         self.playback.prepare_and_schedule_pause(delay)
 
     def _handle_resume_request(self, msg, conn):
         resume_time = msg.get("resume_time")
-        delay = 0.1
+        delay = 0.3
         self.playback.prepare_and_schedule_resume(delay)
 
     def _handle_stop_request(self, msg, conn):
         stop_time = msg.get("stop_time")
 
         # Calculate delay and schedule stop
-        delay = 0.1
+        delay = 0.3
         self.playback.prepare_and_schedule_stop(delay)
 
     def _handle_leader_discovery(self, msg, conn):
@@ -344,7 +346,7 @@ class MessageHandler:
         current_track = msg.get("current_track")
         is_playing = msg.get("is_playing", False)
         current_position = msg.get("current_position", 0)
-        current_index = msg.get("current_index", 0)
+        current_index = msg.get("current_index")
         sync_time = msg.get("sync_time")
         network_latency = msg.get("network_latency")
         round_trip_time = msg.get("round_trip_time")
@@ -384,7 +386,7 @@ class MessageHandler:
                 # Account for network latency
                 adjusted_position = estimated_leader_position + network_latency
 
-                adjusted_position = current_position + network_latency
+                # adjusted_position = current_position + network_latency
                 # adjusted_position = current_position + (time.time() - sync_time)
                 print(f"[STATE_SYNC] Starting playback from adjusted position: {adjusted_position:.2f}s")
 
