@@ -158,6 +158,8 @@ class MessageHandler:
 
     def _handle_pause_request(self, msg, conn):
         pause_time = msg.get("pause_time")
+        pause_position = msg.get("pause_position")
+        self.playback.pause_position = pause_position
         current_time = now()
         delay = current_time - pause_time
         print(f"[Pause delay] {delay}")
@@ -166,14 +168,10 @@ class MessageHandler:
         self.playback.prepare_and_schedule_pause(delay)
 
     def _handle_resume_request(self, msg, conn):
-        resume_time = msg.get("resume_time")
         delay = 0.3
         self.playback.prepare_and_schedule_resume(delay)
 
     def _handle_stop_request(self, msg, conn):
-        stop_time = msg.get("stop_time")
-
-        # Calculate delay and schedule stop
         delay = 0.3
         self.playback.prepare_and_schedule_stop(delay)
 

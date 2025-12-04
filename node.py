@@ -120,7 +120,6 @@ class PeerNode:
                 continue
 
             try:
-                # print(f"[DISCOVER] Asking {pid} about leader {self.leader_id}")
                 resp = send_json_to_addr(host, port, {
                     "type": "LEADER_DISCOVERY",
                     "sender_id": self.id,
@@ -149,10 +148,14 @@ class PeerNode:
             "index": self.player.current_index,
         }, leader_id)
 
-    def broadcast_pause(self, pause_time, leader_id):
-        # print(f"[DEBUG] Broadcasting pause to peers")
+    def broadcast_pause(self, leader_id):
+        future_delay = 0.35
+        pause_time = now()
+        current_position = self.player.get_current_position() + future_delay
+
         self.network.broadcast_message("PAUSE_REQUEST", {
-            "pause_time": pause_time
+            "pause_time": pause_time,
+            "pause_position": current_position
         }, leader_id)
 
     def broadcast_resume(self, resume_time, leader_id):
@@ -163,49 +166,48 @@ class PeerNode:
     def broadcast_stop(self, stop_time, leader_id):
         """Broadcast stop command to all peers"""
 
-        # print(f"[DEBUG] Broadcasting stop to peers")
         self.network.broadcast_message("STOP_REQUEST", {
             "stop_time": stop_time
         }, leader_id)
 
     # --- clock sync (optional) ---
-    def sync_clock_with_peer(self, pid, host, port):
-        """
-        leader connects, sends request, receives follower_time and computes offset.
-        offset = follower_time - (t0 + rtt/2).
-        Stores offset in self.clock_offsets[pid]
-        """
-        try:
-            t0 = now()
-            resp = send_json_to_addr(host, port, {"type":"CLOCK_SYNC_REQUEST", "sender_id": self.id, "leader_time": t0})
-            t2 = now()
-            if resp and resp.get("type") == "CLOCK_SYNC_RESPONSE":
-                follower_time = resp.get("follower_time")
-                rtt = t2 - t0
-                midpoint = t0 + rtt/2.0
-                offset = follower_time - midpoint
-                with self.lock:
-                    self.network.clock_offsets[pid] = offset
-                    self.network.last_seen[pid] = now()
-                # print(f"[CLOCK] {pid} rtt={rtt:.4f}s offset={offset:.4f}s")
-        except Exception:
-            pass
+    # def sync_clock_with_peer(self, pid, host, port):
+    #     """
+    #     leader connects, sends request, receives follower_time and computes offset.
+    #     offset = follower_time - (t0 + rtt/2).
+    #     Stores offset in self.clock_offsets[pid]
+    #     """
+    #     try:
+    #         t0 = now()
+    #         resp = send_json_to_addr(host, port, {"type":"CLOCK_SYNC_REQUEST", "sender_id": self.id, "leader_time": t0})
+    #         t2 = now()
+    #         if resp and resp.get("type") == "CLOCK_SYNC_RESPONSE":
+    #             follower_time = resp.get("follower_time")
+    #             rtt = t2 - t0
+    #             midpoint = t0 + rtt/2.0
+    #             offset = follower_time - midpoint
+    #             with self.lock:
+    #                 self.network.clock_offsets[pid] = offset
+    #                 self.network.last_seen[pid] = now()
+    #             # print(f"[CLOCK] {pid} rtt={rtt:.4f}s offset={offset:.4f}s")
+    #     except Exception:
+    #         pass
 
-    def _periodic_clock_sync(self):
-        while self.running:
-            time.sleep(6.0)
-            if self.is_leader:
-                self.sync_all_peers()
+    # def _periodic_clock_sync(self):
+    #     while self.running:
+    #         time.sleep(6.0)
+    #         if self.is_leader:
+    #             self.sync_all_peers()
 
-    def sync_all_peers(self):
-        peers = self.network.get_peers()
-        threads = []
-        for pid,(h,p) in peers.items():
-            if pid == self.id: continue
-            t = threading.Thread(target=self.sync_clock_with_peer, args=(pid,h,p), daemon=True)
-            t.start(); threads.append(t)
-        for t in threads:
-            t.join(timeout=0.3)
+    # def sync_all_peers(self):
+    #     peers = self.network.get_peers()
+    #     threads = []
+    #     for pid,(h,p) in peers.items():
+    #         if pid == self.id: continue
+    #         # t = threading.Thread(target=self.sync_clock_with_peer, args=(pid,h,p), daemon=True)
+    #         t.start(); threads.append(t)
+    #     for t in threads:
+    #         t.join(timeout=0.3)
 
     # --- helpers for CLI ---
     def show_peers(self):
@@ -273,8 +275,7 @@ class PeerNode:
             print("[PAUSE] not currently playing")
             return
 
-        pause_time = now()
-        self.broadcast_pause(pause_time, leader_id=self.id)
+        self.broadcast_pause(leader_id=self.id)
 
     def resume_immediate(self):
         if self.player.get_playback_state()['is_playing']:
@@ -292,14 +293,6 @@ class PeerNode:
 
         stop_time = now()
         self.broadcast_stop(stop_time, leader_id=self.id)
-
-    # def schedule_pause(self, delay):
-    #     pause_time = now() + delay
-    #     self.broadcast_pause(pause_time, leader_id=self.id)
-
-    # def schedule_resume(self, delay):
-    #     resume_time = now() + delay
-    #     self.broadcast_resume(resume_time, leader_id=self.id)
 
     def list_tracks(self):
         """List available tracks"""

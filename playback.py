@@ -126,9 +126,9 @@ class AudioPlayer:
         with self.lock:
             if self.is_playing:
                 elapsed = now() - self.play_start_time
-                self.pause_position = elapsed
+                # self.pause_position = elapsed
                 self.is_playing = False
-                print(f"[PAUSE] saved position: {self.pause_position:.2f}s")
+                print(f"[PAUSE] saved position: {elapsed:.2f}s")
 
     def _resume_local(self):
         print(f"[RESUME] resuming playback at local_time={now():.3f}")
@@ -149,7 +149,7 @@ class AudioPlayer:
                 pygame.mixer.music.unpause()
                 with self.lock:
                     self.is_playing = True
-                    self.play_start_time = now() - self.resume_position
+                    self.play_start_time = now() - resume_position
                     self.pause_position = 0.0
                 print(f"[RESUME] pygame resumed from position: {resume_position:.2f}s")
                 return
@@ -205,21 +205,22 @@ class AudioPlayer:
         threading.Thread(target=self._delayed_pause_thread, args=(delay,), daemon=True).start()
 
     def _delayed_pause_thread(self, delay):
-        time.sleep(0.5)
+        time.sleep(delay)
         self._pause_local()
 
     def prepare_and_schedule_resume(self, delay):
         threading.Thread(target=self._delayed_resume_thread, args=(delay,), daemon=True).start()
 
     def _delayed_resume_thread(self, delay):
-        time.sleep(0.5)
-        self._resume_local()
+        time.sleep(delay)
+        self._start_play_local_from_position(self.current_track, self.pause_position)
+        # self._resume_local()
 
     def prepare_and_schedule_stop(self, delay):
         threading.Thread(target=self._delayed_stop_thread, args=(delay,), daemon=True).start()
 
     def _delayed_stop_thread(self, delay):
-        time.sleep(0.5)
+        time.sleep(delay)
         self._stop_local()
 
     def next_track(self):

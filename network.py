@@ -65,6 +65,11 @@ class NetworkManager:
         return None, None
 
     def broadcast_message(self, message_type, data, leader_id):
+        if message_type in ["PLAY_REQUEST", "PAUSE_REQUEST", "RESUME_REQUEST", "STOP_REQUEST"]:
+            timeout = 0.05
+        else:
+            timeout = 0.1
+
         with self.lock:
             peers_copy = dict(self.peers)
             all_recipients = list(peers_copy.items()) + [(self.node_id, (self.host, self.port))]
@@ -82,7 +87,7 @@ class NetworkManager:
 
         # Wait for completion
         for thread in threads:
-            thread.join(timeout=0.3)
+            thread.join(timeout=timeout)
 
     def _send_to_peer(self, host, port, peer_id, message_type, data, leader_id):
         message = {
@@ -101,6 +106,7 @@ class NetworkManager:
                 args=(message, MockConn()),
                 daemon=True
             ).start()
+            return True
         else:
             success = self.connection_manager.send_message(host, port, peer_id, message)
             if not success:

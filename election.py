@@ -25,8 +25,6 @@ class BullyElection:
                 return
             self.election_in_progress = True
 
-        # print("[ELECTION] Starting Bully algorithm election...")
-
         my_uuid = uuid.UUID(self.node_id)
         higher_peers = []
         for peer_id in self.peers.keys():
