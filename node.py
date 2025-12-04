@@ -5,7 +5,6 @@ import random
 import argparse
 import threading
 
-# from global_time import GlobalTimeManager
 from playback import AudioPlayer
 from election import BullyElection
 from network import NetworkManager
@@ -47,19 +46,10 @@ class PeerNode:
             self.id, self.network, self.election, self.player
         )
 
-        # Set up election callbacks
-        # self.election.on_new_leader = self._on_new_leader
-
         print(f"[INIT] id={self.id} host={host}:{port} leader={self.is_leader}")
 
     def _handle_message(self, msg, conn):
         self.message_handler.handle_message(msg, conn)
-
-    # def _on_peer_update(self, action, peer_id):
-    #     if action == "removed" and peer_id == self.leader_id:
-    #         print(f"[LEADER] {peer_id} disconnected — starting election")
-    #         delay = random.uniform(0.5, 2.0)
-    #         threading.Timer(delay, self.elect_new_leader).start()
 
     def _update_leader_info(self, leader_id):
         """Update the leader information in the election module"""
@@ -68,9 +58,6 @@ class PeerNode:
 
     def _on_peer_update(self, action, peer_id):
         current_leader_id = self.leader_id
-        print(f"[DEBUG] Peer update: {action} for {peer_id}, current leader: {current_leader_id}")
-        print(f"[DEBUG] I am leader: {self.is_leader}")
-        print(f"[DEBUG] Election module leader_id: {self.election.leader_id}")
 
         if action == "removed" and peer_id == current_leader_id:
             print(f"[LEADER] {peer_id} disconnected — starting election")
@@ -87,17 +74,10 @@ class PeerNode:
 
         if self.is_leader:
             print("[LEADER] I am the new leader!")
-            # New leader responsibilities
             threading.Thread(target=self._announce_new_leadership, daemon=True).start()
-            # threading.Thread(target=self.sync_all_peers, daemon=True).start()
-            # Reconnect to all peers
-            # threading.Thread(target=self._reconnect_as_leader, daemon=True).start()
-            # Broadcast reconnect request
             threading.Thread(target=self.message_handler.broadcast_reconnect_request, daemon=True).start()
         else:
             print(f"[FOLLOWER] I am a follower, new leader: {self.leader_id}")
-            # Ensure connection to new leader
-            # self._ensure_connected_to_leader()
 
     def _get_peer_address(self, peer_id):
         """Helper method for election module to get peer addresses"""
@@ -165,7 +145,8 @@ class PeerNode:
 
         self.network.broadcast_message("PLAY_REQUEST", {
             "track": track,
-            "start_time": start_time
+            "start_time": start_time,
+            "index": self.player.current_index,
         }, leader_id)
 
     def broadcast_pause(self, pause_time, leader_id):
@@ -406,32 +387,6 @@ def main():
                 else:
                     node.resume_immediate()
 
-            # elif cmd[0] == "schedule_pause":
-            #     if not node.is_leader:
-            #         print("only leader can schedule")
-            #     else:
-            #         if len(cmd) > 1:
-            #             try:
-            #                 delay = float(cmd[1])
-            #                 node.schedule_pause(delay)
-            #             except ValueError:
-            #                 print("Invalid delay. Usage: schedule_pause <delay>")
-            #         else:
-            #             print("Usage: schedule_pause <delay>")
-
-            # elif cmd[0] == "schedule_resume":
-            #     if not node.is_leader:
-            #         print("only leader can schedule")
-            #     else:
-            #         if len(cmd) > 1:
-            #             try:
-            #                 delay = float(cmd[1])
-            #                 node.schedule_resume(delay)
-            #             except ValueError:
-            #                 print("Invalid delay. Usage: schedule_resume <delay>")
-            #         else:
-            #             print("Usage: schedule_resume <delay>")
-
             elif cmd[0] == "debug":
                 node.debug_status()
 
@@ -467,7 +422,11 @@ def main():
                     node.play_previous(lead_delay=0.5)
 
             elif cmd[0] == "exit":
-                node.stop_immediate()
+                peers = node.network.get_peers()
+
+                if not peers:
+                    node.stop_immediate()
+
                 break
 
             else:

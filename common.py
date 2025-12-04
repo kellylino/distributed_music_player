@@ -12,7 +12,6 @@ def send_json_to_addr(host, port, obj, timeout=1.5):
         data = json.dumps(obj).encode("utf-8") + b"\n"
         s.sendall(data)
 
-        # try read optional response
         resp = b""
         try:
             chunk = s.recv(BUFFER_SIZE)

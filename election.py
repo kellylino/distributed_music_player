@@ -22,11 +22,10 @@ class BullyElection:
         """Start a Bully algorithm election"""
         with self.lock:
             if self.election_in_progress:
-                print("[ELECTION] Election already in progress, skipping...")
                 return
             self.election_in_progress = True
 
-        print("[ELECTION] Starting Bully algorithm election...")
+        # print("[ELECTION] Starting Bully algorithm election...")
 
         my_uuid = uuid.UUID(self.node_id)
         higher_peers = []
@@ -64,7 +63,7 @@ class BullyElection:
                 if resp and resp.get("type") == "ELECTION_ANSWER":
                     with response_lock:
                         election_responses.append(pid)
-                    print(f"[ELECTION] Received ANSWER from {pid}")
+                    # print(f"[ELECTION] Received ANSWER from {pid}")
             except Exception as e:
                 print(f"[ELECTION] Failed to contact {pid}: {e}")
 
@@ -77,7 +76,7 @@ class BullyElection:
 
         # Wait for responses (with timeout)
         for t in threads:
-            t.join(timeout=1.0)
+            t.join(timeout=2.0)
 
         # If no responses from higher peers, I become the leader
         if not election_responses:
@@ -85,7 +84,7 @@ class BullyElection:
         else:
             # Wait for coordinator message from the new leader
             self.is_leader = False
-            print(f"[ELECTION] Waiting for COORDINATOR message from new leader...")
+            # print(f"[ELECTION] Waiting for COORDINATOR message from new leader...")
             # Set a timeout for coordinator wait
             threading.Thread(
                 target=self._wait_for_coordinator,
@@ -114,7 +113,7 @@ class BullyElection:
 
         while now() - start_time < timeout:
             if self.leader_id and self.leader_id != self.node_id:
-                print(f"[ELECTION] New leader established: {self.leader_id}")
+                # print(f"[ELECTION] New leader established: {self.leader_id}")
                 if on_new_leader_callback:
                     on_new_leader_callback(self.leader_id)
                 return
@@ -127,17 +126,15 @@ class BullyElection:
     def _handle_election_message(self, msg, send_response_callback):
         """Handle incoming election-related messages"""
         msg_type = msg.get("type")
-        sender_id = msg.get("sender_id")
 
         if msg_type == "ELECTION":
             # Received election message from a peer with lower ID
             candidate_id = msg.get("candidate_id")
-            print(f"[ELECTION] Received ELECTION from {candidate_id}")
+            # print(f"[ELECTION] Received ELECTION from {candidate_id}")
 
             # Reply with answer
             send_response_callback({
                 "type": "ELECTION_ANSWER",
-                # "sender_id": sender_id,
                 "sender_id": self.node_id
             })
 
@@ -150,7 +147,7 @@ class BullyElection:
             leader_host = msg.get("host")
             leader_port = msg.get("port")
 
-            print(f"[ELECTION] Received COORDINATOR from new leader: {new_leader_id}")
+            # print(f"[ELECTION] Received COORDINATOR from new leader: {new_leader_id}")
 
             with self.lock:
                 self.leader_id = new_leader_id
@@ -159,27 +156,6 @@ class BullyElection:
             # Update peers with leader info
             if new_leader_id not in self.peers and leader_host and leader_port:
                 self.peers[new_leader_id] = (leader_host, leader_port)
-
-    def announce_leadership(self):
-        """Announce this node as the new leader to all peers"""
-        coordinator_msg = {
-            "type": "COORDINATOR",
-            "sender_id": self.node_id,
-            "leader_id": self.node_id,
-            "host": self.get_peer_address(self.node_id)[0],
-            "port": self.get_peer_address(self.node_id)[1]
-        }
-
-        for peer_id in self.peers:
-            if peer_id == self.node_id:
-                continue
-            host, port = self.get_peer_address(peer_id)
-            if host and port:
-                try:
-                    send_json_to_addr(host, port, coordinator_msg)
-                except Exception as e:
-                    print(f"[ELECTION] Failed to announce to {peer_id}: {e}")
-
 
     def announce_leadership(self, send_to_peer_callback):
         peers_copy = dict(self.peers)
@@ -192,22 +168,3 @@ class BullyElection:
                 "host": None,
                 "port": None
             })
-
-    def get_leader_info(self):
-        """Get current leader information"""
-        with self.lock:
-            return {
-                "is_leader": self.is_leader,
-                "leader_id": self.leader_id,
-                "node_id": self.node_id
-            }
-
-    def update_leader(self, new_leader_id):
-        """Update leader information"""
-        with self.lock:
-            old_leader = self.leader_id
-            self.leader_id = new_leader_id
-            self.is_leader = (new_leader_id == self.node_id)
-
-            if old_leader != new_leader_id:
-                print(f"[ELECTION] Leader updated from {old_leader} to {new_leader_id}")

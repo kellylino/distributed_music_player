@@ -5,6 +5,9 @@ import time
 
 from common import send_json_on_sock, send_json_to_addr
 
+def now():
+    return time.time()
+
 class MessageHandler:
     def __init__(self, node_id, network_manager, election_module, playback_module):
         self.node_id = node_id
@@ -15,9 +18,6 @@ class MessageHandler:
     def handle_message(self, msg, conn):
         m = msg.get("type")
 
-        # print(f"[DEBUG] Received message type: {m} from {msg.get('sender_id', 'unknown')}")
-
-        # Handle election messages separately
         if m == "COORDINATOR":
             self._handle_coordinator_message(msg, conn)
             return
@@ -116,19 +116,6 @@ class MessageHandler:
             "status": "accepted"
         })
 
-    # def _handle_discovery_response(self, msg, conn):
-    #     for e in msg.get("peers", []):
-    #         pid, h, p = e["peer_id"], e["host"], e["port"]
-    #         is_leader = e.get("is_leader", False)
-
-    #         if pid == self.node_id:
-    #             continue
-
-    #         self.network.update_peer_info(pid, h, p, is_leader)
-
-    #         if is_leader and self.election.leader_id != pid:
-    #             self.election.leader_id = pid
-
     def _handle_discovery_response(self, msg, conn):
         leader_found = False
 
@@ -146,11 +133,8 @@ class MessageHandler:
                 leader_found = True
                 print(f"[DISCOVERY] Found leader: {pid}")
 
-        # If we discovered a leader and we're not the leader, request state sync
         if leader_found and not self.election.is_leader:
             print(f"[DISCOVERY] Leader discovered through discovery response, requesting state sync")
-            # threading.Timer(0.1, lambda: self._request_state_sync()).start()
-            # Use a thread instead of Timer
             threading.Thread(target=self._request_state_sync, daemon=True).start()
 
     def _handle_heartbeat(self, msg, conn):
@@ -164,22 +148,17 @@ class MessageHandler:
         sender_id = msg.get("sender_id")
 
         if sender_id:
-            # Update the timestamp for the peer that sent the ACK
-            self.network.last_seen[sender_id] = time.time()
-            # print(f"[HEARTBEAT] Received ACK from {sender_id}")
+            self.network.last_seen[sender_id] = now()
 
     def _handle_play_request(self, msg, conn):
         track = msg.get("track")
-        # start_time = msg.get("start_time")
-        # leader_id = msg.get("leader_id")
-
-        # Calculate delay and schedule playback
-        #delay = start_time - time.time()
+        index = msg.get("index")
+        self.playback.current_index = index
         self.playback.prepare_and_schedule_play(track)
 
     def _handle_pause_request(self, msg, conn):
         pause_time = msg.get("pause_time")
-        current_time = time.time()
+        current_time = now()
         delay = current_time - pause_time
         print(f"[Pause delay] {delay}")
 
@@ -212,7 +191,7 @@ class MessageHandler:
                 })
 
     def _handle_clock_sync_request(self, msg, conn):
-        follower_time = time.time()
+        follower_time = now()
         send_json_on_sock(conn, {
             "type": "CLOCK_SYNC_RESPONSE",
             "sender_id": self.node_id,
@@ -273,7 +252,7 @@ class MessageHandler:
 
     def _request_state_sync(self):
         """Request current playback state from leader"""
-        print(f"[DEBUG] _request_state_sync called")
+        # print(f"[DEBUG] _request_state_sync called")
         print(f"[DEBUG] election.is_leader={self.election.is_leader}, election.leader_id={self.election.leader_id}")
 
         if self.election.is_leader or not self.election.leader_id:
@@ -281,15 +260,15 @@ class MessageHandler:
             return
 
         leader_host, leader_port = self.network.get_peer_address(self.election.leader_id)
-        print(f"[DEBUG] Leader address: {leader_host}:{leader_port}")
+        # print(f"[DEBUG] Leader address: {leader_host}:{leader_port}")
 
         if leader_host and leader_port:
             try:
-                print(f"[STATE_SYNC] Requesting playback state from leader {self.election.leader_id}")
+                # print(f"[STATE_SYNC] Requesting playback state from leader {self.election.leader_id}")
                 send_json_to_addr(leader_host, leader_port, {
                     "type": "STATE_SYNC_REQUEST",
                     "sender_id": self.node_id,
-                    "request_time": time.time()
+                    "request_time": now()
                 })
                 print(f"[DEBUG] State sync request sent successfully")
             except Exception as e:
@@ -311,13 +290,13 @@ class MessageHandler:
         current_position = self.playback.get_current_position()
 
         # Calculate network latency
-        current_time = time.time()
+        current_time = now()
         round_trip_time = current_time - request_time
         network_latency = round_trip_time / 2.0
 
-        print(f"[STATE_SYNC] Sending playback state to {sender_id}: track={playback_state['current_track']}, playing={playback_state['is_playing']}, position={current_position:.2f}s")
+        # print(f"[STATE_SYNC] Sending playback state to {sender_id}: track={playback_state['current_track']}, playing={playback_state['is_playing']}, position={current_position:.2f}s")
 
-        # FIX: Send response directly to the sender instead of using the incoming connection
+        # Send response directly to the sender instead of using the incoming connection
         sender_host, sender_port = self.network.get_peer_address(sender_id)
         if sender_host and sender_port:
             try:
@@ -333,7 +312,7 @@ class MessageHandler:
                     "network_latency": network_latency,
                     "round_trip_time": round_trip_time
                 })
-                print(f"[STATE_SYNC] Response sent directly to {sender_id} at {sender_host}:{sender_port}")
+                # print(f"[STATE_SYNC] Response sent directly to {sender_id} at {sender_host}:{sender_port}")
             except Exception as e:
                 print(f"[STATE_SYNC] Failed to send direct response to {sender_id}: {e}")
         else:
@@ -341,17 +320,19 @@ class MessageHandler:
 
     def _handle_state_sync_response(self, msg, conn):
         """Handle playback state synchronization response"""
-        print(f"[DEBUG] _handle_state_sync_response called")
+        if self.election.is_leader:
+            print(f"[STATE_SYNC] Ignoring response - I'm the leader")
+            return
 
         current_track = msg.get("current_track")
         is_playing = msg.get("is_playing", False)
-        current_position = msg.get("current_position", 0)
+        current_position = msg.get("current_position")
         current_index = msg.get("current_index")
         sync_time = msg.get("sync_time")
         network_latency = msg.get("network_latency")
         round_trip_time = msg.get("round_trip_time")
 
-        print(f"[STATE_SYNC] Received playback state: track={current_track}, playing={is_playing}, position={current_position:.2f}s")
+        # print(f"[STATE_SYNC] Received playback state: track={current_track}, playing={is_playing}, position={current_position:.2f}s")
         print(f"[NET_LATENCY] Network latency: {network_latency:.3f}s, RTT: {round_trip_time:.3f}s")
 
         # Update local playback state to match the cluster
@@ -359,25 +340,21 @@ class MessageHandler:
             # Check if track exists locally
             playlist = self.playback.get_playlist()
             if current_track not in playlist:
-                print(f"[STATE_SYNC_WARNING] Track {current_track} not found in local playlist")
-                print(f"[STATE_SYNC] Available tracks: {playlist}")
                 # Try to find track by index
                 if 0 <= current_index < len(playlist):
                     current_track = playlist[current_index]
-                    print(f"[STATE_SYNC] Using track at index {current_index}: {current_track}")
                 else:
-                    print(f"[STATE_SYNC_ERROR] Cannot sync - track not available")
                     return
 
             # Set the current track and index
             with self.playback.lock:
                 self.playback.current_track = current_track
                 self.playback.current_index = current_index
-            print(f"[STATE_SYNC] Updated local state: track={current_track}, index={current_index}")
+            # print(f"[STATE_SYNC] Updated local state: track={current_track}, index={current_index}")
 
             if is_playing:
                 # Calculate adjusted start time based on sync time
-                current_time = time.time()
+                current_time = now()
                 time_since_sync = current_time - sync_time
 
                 # Leader has continued playing since sending the response
@@ -386,21 +363,18 @@ class MessageHandler:
                 # Account for network latency
                 adjusted_position = estimated_leader_position + network_latency
 
-                # adjusted_position = current_position + network_latency
-                # adjusted_position = current_position + (time.time() - sync_time)
                 print(f"[STATE_SYNC] Starting playback from adjusted position: {adjusted_position:.2f}s")
 
                 # Load and start playing from the calculated position
                 if hasattr(self.playback, '_start_play_local_from_position'):
                     success = self.playback._start_play_local_from_position(current_track, adjusted_position)
-                    print(f"[STATE_SYNC] Playback started: {success}")
+                    # print(f"[STATE_SYNC] Playback started: {success}")
                 else:
                     # Fallback: start from beginning
                     print(f"[STATE_SYNC] Fallback: starting from beginning")
                     self.playback._start_play_local(current_track)
             else:
-                # Store the paused position without actually playing
-                print(f"[STATE_SYNC] Setting paused state at position: {current_position:.2f}s")
+                # print(f"[STATE_SYNC] Setting paused state at position: {current_position:.2f}s")
 
                 with self.playback.lock:
                     self.playback.current_track = current_track

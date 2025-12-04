@@ -10,6 +10,9 @@ HEARTBEAT_INTERVAL = 1.0
 MONITOR_INTERVAL = 1.5
 PEER_TIMEOUT = 2.0
 
+def now():
+    return time.time()
+
 class NetworkManager:
     def __init__(self, host, port, node_id, on_message_callback, on_peer_update_callback, on_leader_update_callback=None):
         self.host = host
@@ -48,7 +51,7 @@ class NetworkManager:
 
                 with self.lock:
                     self.peers[pid] = (host, port)
-                    self.last_seen[pid] = time.time()
+                    self.last_seen[pid] = now()
 
                 # Ask for discovery
                 send_json_to_addr(host, port, {
@@ -89,9 +92,6 @@ class NetworkManager:
             **data
         }
 
-        start_time = time.time()
-        print(f"[Before] {start_time}")
-
         if peer_id == self.node_id:
             # Send to self - simulate network message
             class MockConn:
@@ -105,9 +105,6 @@ class NetworkManager:
             success = self.connection_manager.send_message(host, port, peer_id, message)
             if not success:
                 print(f"[SEND] Failed to send {message_type} to {peer_id}")
-
-        end_time = time.time()
-        print(f"[After] {end_time} - Duration: {end_time - start_time:.3f}s")
 
     def _run_server(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -138,7 +135,7 @@ class NetworkManager:
         sid = msg.get("sender_id")
         if sid:
             with self.lock:
-                self.last_seen[sid] = time.time()
+                self.last_seen[sid] = now()
                 if "host" in msg and "port" in msg:
                     self.peers[sid] = (msg["host"], msg["port"])
 
@@ -153,7 +150,7 @@ class NetworkManager:
                     resp = send_json_to_addr(h, p, {"type": "HEARTBEAT", "sender_id": self.node_id})
                     if resp and resp.get("type") == "HEARTBEAT_ACK":
                         with self.lock:
-                            self.last_seen[pid] = time.time()
+                            self.last_seen[pid] = now()
                 except Exception as e:
                     print(f"[HEARTBEAT] {pid} unreachable: {e}")
 
@@ -163,7 +160,7 @@ class NetworkManager:
     def _monitor_loop(self):
         while self.running:
             time.sleep(MONITOR_INTERVAL)
-            nowt = time.time()
+            nowt = now()
             removed = []
 
             with self.lock:
@@ -217,7 +214,7 @@ class NetworkManager:
     def update_peer_info(self, peer_id, host, port, is_leader=False):
         with self.lock:
             self.peers[peer_id] = (host, port)
-            self.last_seen[peer_id] = time.time()
+            self.last_seen[peer_id] = now()
 
 class ConnectionManager:
     def __init__(self):
