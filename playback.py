@@ -49,13 +49,6 @@ class AudioPlayer:
             }
 
     def _start_play_local(self, track):
-        local_path = os.path.join(self.music_dir, track) if track else None
-
-        if not local_path or not os.path.isfile(local_path):
-            print(f"[PLAY_ERR] Track file not found: {track}")
-            return False
-
-        # update status
         with self.lock:
             self.current_track = track
             self.is_playing = True
@@ -64,7 +57,6 @@ class AudioPlayer:
 
         if AUDIO_BACKEND == "pygame":
             try:
-                pygame.mixer.music.load(local_path)
                 pygame.mixer.music.play()
 
                 time.sleep(0.05)
@@ -78,17 +70,13 @@ class AudioPlayer:
 
     def _start_play_local_from_position(self, track, position):
         local_path = os.path.join(self.music_dir, track) if track else None
-
-        if not local_path or not os.path.isfile(local_path):
-            print(f"[PLAY_ERR] Track file not found: {track}")
-            return False
+        pygame.mixer.music.load(local_path)
 
         if AUDIO_BACKEND == "pygame":
             try:
                 if pygame.mixer.music.get_busy():
                     pygame.mixer.music.stop()
 
-                pygame.mixer.music.load(local_path)
                 pygame.mixer.music.play(start=position)
 
                 with self.lock:
@@ -130,37 +118,37 @@ class AudioPlayer:
                 self.is_playing = False
                 print(f"[PAUSE] saved position: {elapsed:.2f}s")
 
-    def _resume_local(self):
-        print(f"[RESUME] resuming playback at local_time={now():.3f}")
+    # def _resume_local(self):
+    #     print(f"[RESUME] resuming playback at local_time={now():.3f}")
 
-        with self.lock:
-            if self.is_playing:
-                print("[RESUME] already playing")
-                return
+    #     with self.lock:
+    #         if self.is_playing:
+    #             print("[RESUME] already playing")
+    #             return
 
-            if not self.current_track:
-                print("[RESUME_ERR] no track to resume")
-                return
+    #         if not self.current_track:
+    #             print("[RESUME_ERR] no track to resume")
+    #             return
 
-        resume_position = self.pause_position
+    #     resume_position = self.pause_position
 
-        if AUDIO_BACKEND == "pygame":
-            try:
-                pygame.mixer.music.unpause()
-                with self.lock:
-                    self.is_playing = True
-                    self.play_start_time = now() - resume_position
-                    self.pause_position = 0.0
-                print(f"[RESUME] pygame resumed from position: {resume_position:.2f}s")
-                return
-            except Exception as e:
-                print(f"[RESUME_ERR] pygame resume failed: {e}")
-                print(f"[RESUME] falling back to position-based playback")
-                self._start_play_local_from_position(self.current_track, self.pause_position)
-                return
+    #     if AUDIO_BACKEND == "pygame":
+    #         try:
+    #             pygame.mixer.music.unpause()
+    #             with self.lock:
+    #                 self.is_playing = True
+    #                 self.play_start_time = now() - resume_position
+    #                 self.pause_position = 0.0
+    #             print(f"[RESUME] pygame resumed from position: {resume_position:.2f}s")
+    #             return
+    #         except Exception as e:
+    #             print(f"[RESUME_ERR] pygame resume failed: {e}")
+    #             print(f"[RESUME] falling back to position-based playback")
+    #             self._start_play_local_from_position(self.current_track, self.pause_position)
+    #             return
 
     # --- Public API ---
-    def prepare_and_schedule_play(self, track):
+    def prepare_and_schedule_play(self, track, delay):
         local_path = os.path.join(self.music_dir, track) if track else None
 
         if local_path and os.path.isfile(local_path):
@@ -175,7 +163,7 @@ class AudioPlayer:
         else:
             print("[AUDIO] track missing locally:", track)
 
-        threading.Thread(target=self._delayed_play_thread, args=(track,), daemon=True).start()
+        threading.Thread(target=self._delayed_play_thread, args=(delay, track), daemon=True).start()
 
     def _stop_local(self):
         with self.lock:
@@ -186,7 +174,6 @@ class AudioPlayer:
         if AUDIO_BACKEND == "pygame":
             try:
                 pygame.mixer.music.stop()
-                # print("[STOP] pygame music stopped")
             except Exception as e:
                 print(f"[STOP_ERR] pygame stop failed: {e}")
 
@@ -196,9 +183,8 @@ class AudioPlayer:
             self.pause_position = 0.0
             self.play_start_time = 0.0
 
-    def _delayed_play_thread(self, track):
-        # Sleep until target, then start
-        time.sleep(0.5)
+    def _delayed_play_thread(self, delay, track):
+        time.sleep(delay)
         self._start_play_local(track)
 
     def prepare_and_schedule_pause(self, delay):
@@ -208,7 +194,21 @@ class AudioPlayer:
         time.sleep(delay)
         self._pause_local()
 
-    def prepare_and_schedule_resume(self, delay):
+    def prepare_and_schedule_resume(self, track, delay):
+        local_path = os.path.join(self.music_dir, track) if track else None
+
+        if local_path and os.path.isfile(local_path):
+            if AUDIO_BACKEND == "pygame":
+                try:
+                    pygame.mixer.music.load(local_path)
+                except Exception as e:
+                    print("[AUDIO] load failed:", e)
+            else:
+                print("[Error] no pyname abckend")
+                pass
+        else:
+            print("[AUDIO] track missing locally:", track)
+
         threading.Thread(target=self._delayed_resume_thread, args=(delay,), daemon=True).start()
 
     def _delayed_resume_thread(self, delay):

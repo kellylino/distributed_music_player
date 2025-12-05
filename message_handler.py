@@ -154,7 +154,8 @@ class MessageHandler:
         track = msg.get("track")
         index = msg.get("index")
         self.playback.current_index = index
-        self.playback.prepare_and_schedule_play(track)
+        delay = 0.3
+        self.playback.prepare_and_schedule_play(track, delay)
 
     def _handle_pause_request(self, msg, conn):
         pause_time = msg.get("pause_time")
@@ -168,8 +169,9 @@ class MessageHandler:
         self.playback.prepare_and_schedule_pause(delay)
 
     def _handle_resume_request(self, msg, conn):
+        track = msg.get("track")
         delay = 0.3
-        self.playback.prepare_and_schedule_resume(delay)
+        self.playback.prepare_and_schedule_resume(track, delay)
 
     def _handle_stop_request(self, msg, conn):
         delay = 0.3
@@ -288,11 +290,9 @@ class MessageHandler:
         current_position = self.playback.get_current_position()
 
         # Calculate network latency
-        current_time = now()
-        round_trip_time = current_time - request_time
-        network_latency = round_trip_time / 2.0
-
-        # print(f"[STATE_SYNC] Sending playback state to {sender_id}: track={playback_state['current_track']}, playing={playback_state['is_playing']}, position={current_position:.2f}s")
+        # current_time = now()
+        # round_trip_time = current_time - request_time
+        # network_latency = round_trip_time / 2.0
 
         # Send response directly to the sender instead of using the incoming connection
         sender_host, sender_port = self.network.get_peer_address(sender_id)
@@ -306,11 +306,10 @@ class MessageHandler:
                     "is_playing": playback_state['is_playing'],
                     "current_position": current_position,
                     "current_index": playback_state['current_index'],
-                    "sync_time": current_time,
-                    "network_latency": network_latency,
-                    "round_trip_time": round_trip_time
+                    "sync_time": request_time,
+                    # "network_latency": network_latency,
+                    # "round_trip_time": round_trip_time
                 })
-                # print(f"[STATE_SYNC] Response sent directly to {sender_id} at {sender_host}:{sender_port}")
             except Exception as e:
                 print(f"[STATE_SYNC] Failed to send direct response to {sender_id}: {e}")
         else:
@@ -323,15 +322,15 @@ class MessageHandler:
             return
 
         current_track = msg.get("current_track")
-        is_playing = msg.get("is_playing", False)
+        is_playing = msg.get("is_playing")
         current_position = msg.get("current_position")
         current_index = msg.get("current_index")
         sync_time = msg.get("sync_time")
-        network_latency = msg.get("network_latency")
-        round_trip_time = msg.get("round_trip_time")
+        # network_latency = msg.get("network_latency")
+        # round_trip_time = msg.get("round_trip_time")
 
         # print(f"[STATE_SYNC] Received playback state: track={current_track}, playing={is_playing}, position={current_position:.2f}s")
-        print(f"[NET_LATENCY] Network latency: {network_latency:.3f}s, RTT: {round_trip_time:.3f}s")
+        # print(f"[NET_LATENCY] Network latency: {network_latency:.3f}s, RTT: {round_trip_time:.3f}s")
 
         # Update local playback state to match the cluster
         if current_track:
@@ -356,10 +355,10 @@ class MessageHandler:
                 time_since_sync = current_time - sync_time
 
                 # Leader has continued playing since sending the response
-                estimated_leader_position = current_position + time_since_sync
+                # estimated_leader_position = current_position + time_since_sync/2
 
                 # Account for network latency
-                adjusted_position = estimated_leader_position + network_latency
+                adjusted_position = current_position + time_since_sync/2
 
                 print(f"[STATE_SYNC] Starting playback from adjusted position: {adjusted_position:.2f}s")
 
