@@ -280,4 +280,77 @@ class AudioPlayer:
 
         Args:
             track (str): Track to resume
-         
+            delay (float): Seconds to wait before resuming
+        """
+        local_path = os.path.join(self.music_dir, track) if track else None
+
+        # Pre-load the track
+        if local_path and os.path.isfile(local_path):
+            if AUDIO_BACKEND == "pygame":
+                try:
+                    pygame.mixer.music.load(local_path)
+                except Exception as e:
+                    print("[AUDIO] load failed:", e)
+            else:
+                print("[Error] no pyname abckend")
+                pass
+        else:
+            print("[AUDIO] track missing locally:", track)
+
+        threading.Thread(target=self._delayed_resume_thread, args=(delay,), daemon=True).start()
+
+    def _delayed_resume_thread(self, delay):
+        """Thread function for delayed resume."""
+        time.sleep(delay)
+        self._start_play_local_from_position(self.current_track, self.pause_position)
+        # self._resume_local()
+
+    def prepare_and_schedule_stop(self, delay):
+        """Schedule stop after specified delay."""
+
+        threading.Thread(target=self._delayed_stop_thread, args=(delay,), daemon=True).start()
+
+    def _delayed_stop_thread(self, delay):
+        """Thread function for delayed stop."""
+
+        time.sleep(delay)
+        self._stop_local()
+
+    # --- Playlist Navigation ---
+
+    def next_track(self):
+        """Advance to next track in playlist (circular)."""
+
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = (self.current_index + 1) % len(self.playlist)
+            return self.playlist[self.current_index]
+
+    def previous_track(self):
+        """Go to previous track in playlist (circular)."""
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = (self.current_index - 1) % len(self.playlist)
+            return self.playlist[self.current_index]
+
+    def play_index(self, index):
+        """Play track at specific index in playlist"""
+
+        with self.lock:
+            if not self.playlist:
+                return None
+            self.current_index = index % len(self.playlist)
+            self.current_track = self.playlist[self.current_index]
+            return self.playlist[self.current_index]
+
+    def get_current_position(self):
+        """Get current playback position in seconds"""
+
+        # Returns current position if playing, pause position if paused
+        with self.lock:
+            if self.is_playing:
+                return now() - self.play_start_time
+            else:
+                return self.pause_position

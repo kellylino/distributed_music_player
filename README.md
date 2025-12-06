@@ -39,4 +39,41 @@ The system uses JSON messages for communication:
 
 ## 📦 Installation & Requirements
 
-### Prerequ
+### Prerequisites
+
+```bash
+# Python 3.9 or higher
+python --version
+
+# Required packages
+pip install pygame
+```
+
+## 1. Start the Leader Node
+
+```bash
+# Start as leader on port 5000
+python node.py localhost 5000 --leader
+
+# Start follower on port 5001, connect to leader
+python node.py localhost 5001 --bootstrap localhost 5000
+
+# Start another follower on port 5002
+python node.py localhost 5002 --bootstrap localhost 5000
+```
+
+## CLI Commands
+
+| Command        | Description               | Leader Only |
+|----------------|---------------------------|-------------|
+| `peers`        | Show connected nodes      | No          |
+| `list`         | List available tracks     | No          |
+| `play <index>` | Play specific track       | Yes         |
+| `pause`        | Pause playback            | Yes         |
+| `resume`       | Resume playback           | Yes         |
+| `stop`         | Stop playback             | Yes         |
+| `next`         | Play next track           | Yes         |
+| `prev`         | Play previous track       | Yes         |
+| `status`       | Show playback status      | No          |
+| `debug`        | Show debug information    | No          |
+| `exit`         | Exit program              | No          |

@@ -1,2 +1,2 @@
 Python>=3.9
-p
+pygame>=2.0.0

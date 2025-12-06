@@ -446,4 +446,112 @@ def main():
                             index = int(cmd[1])
                             node.play_index(index)
                         except ValueError:
-                            print("Invalid index. Usage: play 
+                            print("Invalid index. Usage: play <index>")
+                    else:
+                        print("Usage: play <index>")
+
+            elif cmd[0] == "list":
+                tracks = node.list_tracks()
+                if tracks:
+                    lines = ["AVAILABLE TRACKS", ""]
+                    for i, track in enumerate(tracks):
+                        current_flag = " [CURRENT]" if i == node.player.current_index else ""
+                        lines.append(f"  {i:2d}: {track}{current_flag}")
+
+                    max_len = max(len(line) for line in lines)
+                    border = "+" + "-" * (max_len + 2) + "+"
+
+                    print()
+                    print(border)
+                    for line in lines:
+                        print(f"| {line.ljust(max_len)} |")
+                    print(border)
+                    print(f"Total: {len(tracks)} tracks")
+                else:
+                    print("No tracks found in music directory")
+
+            elif cmd[0] == "pause":
+                if not node.is_leader:
+                    print("only leader can schedule")
+                else:
+                    node.pause_immediate()
+
+            elif cmd[0] == "resume":
+                if not node.is_leader:
+                    print("only leader can schedule")
+                else:
+                    node.resume_immediate()
+
+            elif cmd[0] == "debug":
+                node.debug_status()
+
+            elif cmd[0] == "status":
+                playback_state = node.player.get_playback_state()
+                current_track = playback_state['current_track'] or "None"
+                is_playing = playback_state['is_playing']
+                current_index = playback_state['current_index']
+                pause_position = f"{playback_state['pause_position']:.2f}s"
+
+                if is_playing:
+                    current_pos = f"{node.player.get_current_position():.2f}s"
+                else:
+                    current_pos = "N/A"
+
+                lines = [
+                    "PLAYBACK STATUS",
+                    f"Current track   : {current_track}",
+                    f"Playing         : {is_playing}",
+                    f"Current index   : {current_index}",
+                    f"Pause position  : {pause_position}",
+                    f"Current position: {current_pos}",
+                ]
+
+                max_len = max(len(line) for line in lines)
+                border = "+" + "-" * (max_len + 2) + "+"
+
+                print()
+                print(border)
+                for line in lines:
+                    print(f"| {line.ljust(max_len)} |")
+                print(border)
+
+            elif cmd[0] == "stop":
+                if not node.is_leader:
+                    print("only leader can schedule global play")
+                else:
+                    node.stop_immediate()
+                    print("Playback stopped")
+
+            elif cmd[0] == "next":
+                if not node.is_leader:
+                    print("only leader can schedule global play")
+                else:
+                    node.play_next()
+
+            elif cmd[0] == "prev":
+                if not node.is_leader:
+                    print("only leader can schedule global play")
+                else:
+                    node.play_previous()
+
+            elif cmd[0] == "exit":
+                # Stop playback before exiting if no other peers
+                peers = node.network.get_peers()
+
+                if not peers:
+                    node.stop_immediate()
+                break
+
+            else:
+                print("\nUnknown command")
+                PeerNode.print_commands_box()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.running = False
+        time.sleep(0.5)
+        print("Goodbye!")
+
+if __name__ == "__main__":
+    main()

@@ -279,4 +279,169 @@ class NetworkManager:
         while self.running:
             time.sleep(5.0) # Sync every 5 seconds
             with self.lock:
-               
+                if not self.peers:
+                    continue
+
+                # Choose random peer for synchronization
+                peers_list = list(self.peers.items())
+                if peers_list:
+                    random_peer = random.choice(peers_list)
+                    pid, (h, p) = random_peer
+
+            try:
+                # Request discovery from random peer
+                response = send_json_to_addr(h, p, {
+                    "type": "DISCOVERY_REQUEST",
+                    "sender_id": self.node_id
+                })
+
+                if response and response.get("type") == "DISCOVERY_RESPONSE":
+                    # Process discovery response
+                    class MockConn:
+                        def close(self): pass
+                        def sendall(self, data): pass
+                    self.on_message_callback(response, MockConn())
+
+            except Exception as e:
+                print(f"[SYNC_DEBUG] Failed to sync with {pid}: {e}")
+
+    def get_peer_address(self, peer_id):
+        """
+        Get address of a peer.
+
+        Args:
+            peer_id (str): Peer's ID
+
+        Returns:
+            tuple: (host, port) or (None, None) if not found
+        """
+
+        with self.lock:
+            return self.peers.get(peer_id, (None, None))
+
+    def get_peers(self):
+        """Get copy of all peers."""
+
+        with self.lock:
+            return dict(self.peers)
+
+    def update_peer_info(self, peer_id, host, port, is_leader):
+        """
+        Update or add peer information.
+
+        Args:
+            peer_id (str): Peer's ID
+            host (str): Peer's host
+            port (int): Peer's port
+            is_leader (bool): Whether peer is leader
+        """
+
+        with self.lock:
+            self.peers[peer_id] = (host, port)
+            self.last_seen[peer_id] = now()
+
+    def __del__(self):
+        """Cleanup when network manager is destroyed."""
+        self.connection_manager.close_all()
+
+class ConnectionManager:
+    """
+    Manages persistent connections to peers.
+
+    Maintains connection pool to avoid reconnecting for each message.
+    """
+
+    def __init__(self):
+        self.connections = {} # peer_id -> socket
+        self.lock = threading.Lock()
+
+    def get_connection(self, host, port, peer_id):
+        """
+        Create persistent connection to peer.
+
+        Args:
+            host (str): Peer's host
+            port (int): Peer's port
+            peer_id (str): Peer's ID
+
+        Returns:
+            socket: Connection socket or None on failure
+        """
+
+        with self.lock:
+            # Check existing connection
+            if peer_id in self.connections:
+                sock = self.connections[peer_id]
+                try:
+                    # Verify connection is still alive
+                    sock.getpeername()
+                    return sock
+                except:
+                    # Connection is dead, remove it
+                    del self.connections[peer_id]
+                    try:
+                        sock.close()
+                    except:
+                        pass
+
+            # Create new connection with proper timeout
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+                # Set connection timeout
+                sock.settimeout(1.0)
+                sock.connect((host, port))
+
+                # Set longer timeout for subsequent operations
+                sock.settimeout(2.0)
+
+                self.connections[peer_id] = sock
+                return sock
+            except Exception as e:
+                print(f"[CONN] Failed to connect to {peer_id}: {e}")
+                return None
+
+    def send_message(self, host, port, peer_id, message):
+        """
+        Send message using persistent connection.
+
+        Args:
+            host (str): Peer's host
+            port (int): Peer's port
+            peer_id (str): Peer's ID
+            message (dict): Message to send
+
+        Returns:
+            bool: True if sent successfully
+        """
+
+        sock = self.get_connection(host, port, peer_id)
+        if sock is None:
+            return False
+
+        try:
+            send_json_on_sock(sock, message)
+            return True
+        except Exception as e:
+            print(f"[CONN] Failed to send to {peer_id}: {e}")
+            # Remove broken connection
+            with self.lock:
+                if peer_id in self.connections:
+                    del self.connections[peer_id]
+            try:
+                sock.close()
+            except:
+                pass
+            return False
+
+    def close_all(self):
+        """Close all persistent connections."""
+
+        with self.lock:
+            for sock in self.connections.items():
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.connections.clear()
