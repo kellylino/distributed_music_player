@@ -1,32 +1,72 @@
 # election.py
-import threading
+"""
+Leader Election Module - Implements Bully Algorithm
+This module handles leader election in a distributed system where
+nodes with higher UUIDs have priority in becoming leaders.
+"""
+
 import time
 import uuid
+import threading
 
 from common import send_json_to_addr
 
 def now():
+    """Helper function to get current timestamp."""
     return time.time()
 
 class BullyElection:
+    """
+    Implements the Bully algorithm for leader election.
+
+    The Bully algorithm:
+    1. When a node detects leader failure, it starts an election
+    2. It sends ELECTION messages to all nodes with higher IDs
+    3. If no higher nodes respond, it declares itself leader
+    4. If higher nodes respond, it waits for COORDINATOR message
+    5. The highest ID among responding nodes becomes leader
+
+    Election messages are sent in parallel with timeout for efficiency.
+    """
+
     def __init__(self, node_id, peers, get_peer_address, is_leader=False, leader_id=None):
+        """
+        Initialize election module.
+
+        Args:
+            node_id (str): Unique identifier for this node
+            peers (dict): Dictionary of peer_id -> (host, port)
+            get_peer_address (function): Function to get address of a peer
+            is_leader (bool): Whether this node starts as leader
+            leader_id (str): ID of current leader if known
+        """
+
         self.node_id = node_id
-        self.peers = peers
+        self.peers = peers  # Shared reference to network peers
         self.get_peer_address = get_peer_address
         self.is_leader = is_leader
         self.leader_id = leader_id or (node_id if is_leader else None)
-        self.election_in_progress = False
-        self.lock = threading.Lock()
+        self.election_in_progress = False # Prevent multiple concurrent elections
+        self.lock = threading.Lock()  # Protect election state
 
     def start_election(self, on_new_leader_callback=None):
-        """Start a Bully algorithm election"""
+        """
+        Start a new leader election using Bully algorithm.
+
+        Args:
+            on_new_leader_callback (function): Callback when new leader is elected
+        """
+
         with self.lock:
             if self.election_in_progress:
                 return
             self.election_in_progress = True
 
+        # Convert UUID strings for comparison
         my_uuid = uuid.UUID(self.node_id)
         higher_peers = []
+
+        # Identify peers with higher UUIDs “will bully us”
         for peer_id in self.peers.keys():
             try:
                 peer_uuid = uuid.UUID(peer_id)
@@ -35,24 +75,22 @@ class BullyElection:
             except ValueError:
                 print(f"[ELECTION_WARNING] Invalid peer ID: {peer_id}")
 
-        print(f"[ELECTION] My ID: {self.node_id}, Higher peers: {higher_peers}")
-
+         # No higher peers - I become the leader
         if not higher_peers:
-            # I have the highest ID, I become the leader
             self._become_leader(on_new_leader_callback)
             return
 
-        # Send election messages to all higher peers
+        # Send election messages to all higher peers in parallel
         election_responses = []
         response_lock = threading.Lock()
 
         def send_election_to_peer(pid):
+            """Send ELECTION message to a specific higher peer."""
             try:
                 host, port = self.get_peer_address(pid)
                 if not host or not port:
                     return
 
-                print(f"[ELECTION] Sending ELECTION to higher peer: {pid}")
                 resp = send_json_to_addr(host, port, {
                     "type": "ELECTION",
                     "sender_id": self.node_id,
@@ -61,18 +99,17 @@ class BullyElection:
                 if resp and resp.get("type") == "ELECTION_ANSWER":
                     with response_lock:
                         election_responses.append(pid)
-                    # print(f"[ELECTION] Received ANSWER from {pid}")
             except Exception as e:
                 print(f"[ELECTION] Failed to contact {pid}: {e}")
 
-        # Send election messages to all higher peers
+        # Start threads for parallel message sending
         threads = []
         for pid in higher_peers:
             t = threading.Thread(target=send_election_to_peer, args=(pid,), daemon=True)
             t.start()
             threads.append(t)
 
-        # Wait for responses (with timeout)
+        # Wait for responses with timeout
         for t in threads:
             t.join(timeout=2.0)
 
@@ -82,8 +119,6 @@ class BullyElection:
         else:
             # Wait for coordinator message from the new leader
             self.is_leader = False
-            # print(f"[ELECTION] Waiting for COORDINATOR message from new leader...")
-            # Set a timeout for coordinator wait
             threading.Thread(
                 target=self._wait_for_coordinator,
                 args=(on_new_leader_callback,),
@@ -94,58 +129,76 @@ class BullyElection:
             self.election_in_progress = False
 
     def _become_leader(self, on_new_leader_callback):
-        """This node becomes the new leader"""
+        """
+        This node becomes the new leader.
+
+        Updates local state and notifies the system via callback.
+        """
+
         with self.lock:
             self.is_leader = True
             self.leader_id = self.node_id
 
-        print(f"[ELECTION] I am the new leader: {self.node_id}")
-
-        # Callback to notify the main node
+        # Notify node about new leadership
         if on_new_leader_callback:
             on_new_leader_callback(self.node_id)
 
     def _wait_for_coordinator(self, on_new_leader_callback, timeout=2.0):
-        """Wait for coordinator message with timeout"""
+        """
+        Wait for COORDINATOR message from new leader.
+
+        If timeout occurs without coordinator message, restart election.
+
+        Args:
+            on_new_leader_callback (function): Callback when leader is known
+            timeout (float): Seconds to wait before timing out
+        """
+
         start_time = now()
 
         while now() - start_time < timeout:
             if self.leader_id and self.leader_id != self.node_id:
-                # print(f"[ELECTION] New leader established: {self.leader_id}")
+                # New leader established
                 if on_new_leader_callback:
                     on_new_leader_callback(self.leader_id)
                 return
             time.sleep(0.5)
 
+        # Timeout - no coordinator received, restart election
         if not self.leader_id or self.leader_id == self.node_id:
-            print(f"[ELECTION] Coordinator timeout, restarting election")
             self.start_election(on_new_leader_callback)
 
     def _handle_election_message(self, msg, send_response_callback):
-        """Handle incoming election-related messages"""
+        """
+        Handle incoming election-related messages
+
+        Called by message_handler when election messages are received.
+
+        Args:
+            msg (dict): The election message
+            send_response_callback (function): Function to send response
+        """
+
         msg_type = msg.get("type")
 
+        # Received election message from a peer with lower ID
         if msg_type == "ELECTION":
-            # Received election message from a peer with lower ID
-            candidate_id = msg.get("candidate_id")
-            # print(f"[ELECTION] Received ELECTION from {candidate_id}")
 
-            # Reply with answer
+            # Respond with ELECTION_ANSWER
             send_response_callback({
                 "type": "ELECTION_ANSWER",
                 "sender_id": self.node_id
             })
 
-            # Start my own election after a short delay
+            # Start own election after a short delay
+            # This ensures the highest ID node eventually becomes leader
             threading.Timer(0.1, self.start_election).start()
 
         elif msg_type == "COORDINATOR":
-            # Received coordinator announcement from new leader
+            # Received leader announcement
             new_leader_id = msg.get("leader_id")
             leader_host = msg.get("host")
             leader_port = msg.get("port")
-
-            # print(f"[ELECTION] Received COORDINATOR from new leader: {new_leader_id}")
 
             with self.lock:
                 self.leader_id = new_leader_id
@@ -156,6 +209,14 @@ class BullyElection:
                 self.peers[new_leader_id] = (leader_host, leader_port)
 
     def announce_leadership(self, send_to_peer_callback):
+        """
+        Announce this node as leader to all peers.
+
+        Args:
+            send_to_peer_callback (function): Function to send message to peer
+        """
+
+        # Create copy to avoid modification during iteration
         peers_copy = dict(self.peers)
 
         for pid in peers_copy:
@@ -163,6 +224,6 @@ class BullyElection:
                 "type": "COORDINATOR",
                 "sender_id": self.node_id,
                 "leader_id": self.node_id,
-                "host": None,
-                "port": None
+                "host": None,  # Will be filled by node
+                "port": None   # Will be filled by node
             })
