@@ -59,8 +59,12 @@ class BullyElection:
 
         with self.lock:
             if self.election_in_progress:
+                # print("[ELECTION] Election already in progress, skipping...")
                 return
             self.election_in_progress = True
+
+        # print("[ELECTION] Starting Bully algorithm election...")
+
 
         # Convert UUID strings for comparison
         my_uuid = uuid.UUID(self.node_id)
@@ -116,9 +120,11 @@ class BullyElection:
         # If no responses from higher peers, I become the leader
         if not election_responses:
             self._become_leader(on_new_leader_callback)
+            # print("[LEADER] I am the new leader!")
         else:
             # Wait for coordinator message from the new leader
             self.is_leader = False
+            print(f"[ELECTION] Waiting for COORDINATOR message from new leader...")
             threading.Thread(
                 target=self._wait_for_coordinator,
                 args=(on_new_leader_callback,),

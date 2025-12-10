@@ -180,10 +180,11 @@ class AudioPlayer:
         # Update payback state
         with self.lock:
             if self.is_playing:
-                elapsed = now() - self.play_start_time
+                # elapsed = now() - self.play_start_time
                 # self.pause_position = elapsed
                 self.is_playing = False
-                print(f"[PAUSE] saved position: {elapsed:.2f}s")
+                # print(f"[PAUSE] saved position: {elapsed:.2f}s")
+                print(f"[PAUSE] current music pause")
 
     def _stop_local(self):
         """Stop playback completely and reset state."""

@@ -87,10 +87,11 @@ class PeerNode:
         current_leader_id = self.leader_id
 
         if action == "removed" and peer_id == current_leader_id:
-            delay = random.uniform(0.5, 2.0) # Random delay to prevent collisions
+            delay = random.uniform(0.3, 1.0) # Random delay to prevent collisions
             threading.Timer(delay, self.elect_new_leader).start()
         elif action == "removed":
-            print(f"[Peer] {peer_id} removed, but it's not the leader (leader is {current_leader_id})")
+            # print(f"[Peer] {peer_id} removed, but it's not the leader (leader is {current_leader_id})")
+            pass
 
     def _on_new_leader(self, leader_id):
         """
@@ -551,6 +552,7 @@ def main():
     finally:
         node.running = False
         time.sleep(0.5)
+        print("--------")
         print("Goodbye!")
 
 if __name__ == "__main__":
